@@ -134,26 +134,22 @@ struct ResourceActionInput {
     name: Ident,
 }
 
-#[derive(Debug)]
-enum ResourceActionInputKind {
-    Create { accept: ActionCreateAccept },
-}
-
-#[derive(Debug)]
-enum ActionCreateAccept {
-    Default,
-    Only(Vec<Ident>),
-}
-
-impl Parse for ResourceActionInputKind {
+impl Parse for ResourceActionInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let key: Ident = input.parse()?;
+        let kind: Ident = input.parse()?;
+        let name: Ident = input.parse()?;
 
-        let token = match key.to_string().as_str() {
+        let kind = match kind.to_string().as_str() {
             "create" => {
-                // TODO: Actually verify if this is accept
-                if input.peek(Ident) {
-                    let _: Ident = input.parse()?;
+                if input.peek(Token![;]) {
+                    let _: Token![;] = input.parse()?;
+
+                    ResourceActionInputKind::Create {
+                        accept: ActionCreateAccept::Default,
+                    }
+                } else {
+                    // TODO: Verify this
+                    let _: Ident = input.parse()?; // `accept`
 
                     let content;
                     bracketed!(content in input);
@@ -164,27 +160,34 @@ impl Parse for ResourceActionInputKind {
                         idents.push(content.parse()?);
                     }
 
-                    Self::Create {
+                    let _: Token![;] = input.parse()?;
+
+                    ResourceActionInputKind::Create {
                         accept: ActionCreateAccept::Only(idents),
-                    }
-                } else {
-                    Self::Create {
-                        accept: ActionCreateAccept::Default,
                     }
                 }
             }
             got => {
                 return Err(syn::Error::new(
-                    key.span(),
+                    kind.span(),
                     format!("Unexpected action kind, got `{got}`"),
                 ));
             }
         };
 
-        let _: Token![;] = input.parse()?;
-
-        Ok(token)
+        Ok(ResourceActionInput { kind, name })
     }
+}
+
+#[derive(Debug)]
+enum ResourceActionInputKind {
+    Create { accept: ActionCreateAccept },
+}
+
+#[derive(Debug)]
+enum ActionCreateAccept {
+    Default,
+    Only(Vec<Ident>),
 }
 
 impl Parse for ResourceMacroInput {
@@ -228,10 +231,7 @@ impl Parse for ResourceMacroInput {
             syn::braced!(content in input);
 
             while !content.is_empty() {
-                actions.push(ResourceActionInput {
-                    name: content.parse()?,
-                    kind: content.parse()?,
-                });
+                actions.push(content.parse()?);
             }
         }
 

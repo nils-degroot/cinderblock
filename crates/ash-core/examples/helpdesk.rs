@@ -12,10 +12,9 @@ resource! {
     }
 
     actions = {
-        open create;
+        create open;
 
-        assign create
-            accept [ subject ];
+        create assign accept [ subject ];
     }
 }
 
@@ -26,15 +25,15 @@ enum TicketStatus {
     Closed,
 }
 
-// resource! {
-//     name = Helpdesk.Support.Representative;
-//
-//     attributes = {
-//         primary_key id i32;
-//
-//         attribute name String;
-//     }
-// }
+resource! {
+    name = Helpdesk.Support.Representative;
+
+    attributes = {
+        primary_key id i32;
+
+        attribute name String;
+    }
+}
 
 fn main() {
     let ctx = Context::default();
