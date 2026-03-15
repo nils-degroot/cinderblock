@@ -5,3 +5,10 @@ edition.workspace = true
 
 [dependencies]
 ash-core-macros = { version = "0.1.0", path = "../ash-core-macros" }
+dirs2 = "3.0.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.50.0", features = ["fs"] }
+
+[dev-dependencies]
+tokio = { version = "1.50.0", features = ["full"] }

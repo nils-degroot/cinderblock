@@ -4,15 +4,8 @@ use std::collections::HashSet;
 use syn::{Ident, Token, Type, bracketed, parse::Parse, punctuated::Punctuated};
 
 #[proc_macro]
-pub fn make_answer(_item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    "fn answer() -> u32 { 42 }".parse().unwrap()
-}
-
-#[proc_macro]
 pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(item as ResourceMacroInput);
-
-    dbg!(&input);
 
     let ident = input.name.last().expect("Missing name segment");
 
@@ -20,6 +13,51 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .attributes
         .iter()
         .map(ResourceAttributeInput::to_field_definition);
+
+    let primary_key_type = {
+        let fields = input
+            .attributes
+            .iter()
+            .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
+            .collect::<Vec<_>>();
+
+        match fields.len() {
+            0 => todo!(),
+            1 => {
+                let ty = fields[0].ty.clone();
+                quote::quote! { #ty }
+            }
+            _ => {
+                let tys = fields.iter().map(|attr| attr.ty.clone());
+                quote::quote! {
+                    ( #(#tys),* )
+                }
+            }
+        }
+    };
+
+    let primary_key_value = {
+        let fields = input
+            .attributes
+            .iter()
+            .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
+            .collect::<Vec<_>>();
+
+        match fields.len() {
+            0 => todo!(),
+            1 => {
+                let ty = fields[0].name.clone();
+                quote::quote! { &self.#ty }
+            }
+            _ => {
+                let names = fields.iter().map(|attr| attr.name.clone());
+
+                quote::quote! {
+                    ( #(&self.#names),* )
+                }
+            }
+        }
+    };
 
     let actions = input.actions.iter().map(|action| match &action.kind {
         ResourceActionInputKind::Create { accept } => {
@@ -32,22 +70,36 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 .iter()
                 .filter(|attribute| attribute.kind == ResourceAttributeInputKind::Attribute);
 
-            let attributes = match accept {
-                ActionCreateAccept::Default => attributes
-                    .map(ResourceAttributeInput::to_field_definition)
-                    .collect::<Vec<_>>(),
+            let (present, missing) = match accept {
+                ActionCreateAccept::Default => (attributes.collect::<Vec<_>>(), vec![]),
                 ActionCreateAccept::Only(idents) => {
                     let idents = idents
                         .iter()
                         .map(|ident| ident.to_string())
                         .collect::<HashSet<_>>();
 
-                    attributes
-                        .filter(|attribute| idents.contains(&attribute.name.to_string()))
-                        .map(ResourceAttributeInput::to_field_definition)
-                        .collect::<Vec<_>>()
+                    attributes.fold((vec![], vec![]), |(mut present, mut missing), attr| {
+                        if idents.contains(&attr.name.to_string()) {
+                            present.push(attr);
+                        } else {
+                            missing.push(attr);
+                        }
+                        (present, missing)
+                    })
                 }
             };
+
+            dbg!((&present, &missing));
+
+            let attributes = present.iter().map(|attr| attr.to_field_definition());
+            let present_names = present.iter().map(|attr| attr.name.clone());
+            let missing_names = missing.iter().map(|attr| attr.name.clone());
+
+            let pks = input
+                .attributes
+                .iter()
+                .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
+                .map(|pk| pk.name.clone());
 
             quote::quote! {
                 #[derive(::std::fmt::Debug)]
@@ -62,20 +114,42 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                     type Input = #input_name;
 
                     fn from_create_input(input: Self::Input) -> Self {
-                        todo!("Implement this method")
+                        #ident {
+                            // TODO: Properly handle PK's here
+                            #(#pks: ::std::default::Default::default(),)*
+
+                            // Iterate over attributes in #action_name.
+                            #(#present_names: input.#present_names,)*
+
+                            // All types attributes not present in #action_name should use default
+                            #(#missing_names: ::std::default::Default::default(),)*
+                        }
                     }
                 }
             }
         }
     });
 
+    let name_segments = input.name.iter().map(|segment| segment.to_string());
+
     quote::quote! {
-        #[derive(::std::fmt::Debug)]
+        #[derive(::std::fmt::Debug, ash_core::serde::Serialize, ash_core::serde::Deserialize)]
         struct #ident {
             #(#fields),*
         }
 
-        impl ash_core::Resource for #ident { }
+        impl ash_core::Resource for #ident {
+            type PrimaryKey = #primary_key_type;
+
+            // TODO: If the user specifies a different data layer for the resource, use that one instead.
+            type DataLayer = ash_core::data_layer::file_storage::FileStorageDataLayer;
+
+            const NAME: &'static [&'static str] = &[#(#name_segments),*];
+
+            fn primary_key(&self) -> &Self::PrimaryKey {
+                #primary_key_value
+            }
+        }
 
         #(#actions)*
     }

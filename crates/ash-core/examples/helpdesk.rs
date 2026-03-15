@@ -1,4 +1,7 @@
-use ash_core::{Context, resource};
+use ash_core::{
+    Context, resource,
+    serde::{Deserialize, Serialize},
+};
 
 resource! {
     name = Helpdesk.Support.Ticket;
@@ -18,7 +21,7 @@ resource! {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 enum TicketStatus {
     #[default]
     Open,
@@ -35,8 +38,11 @@ resource! {
     }
 }
 
-fn main() {
-    let ctx = Context::default();
+#[tokio::main]
+async fn main() {
+    let ctx = Context::new("helpdesk")
+        .await
+        .expect("Failed to setup context");
 
     let resource = ash_core::create::<Ticket, Open>(
         OpenInput {
@@ -45,6 +51,7 @@ fn main() {
         },
         &ctx,
     )
+    .await
     .expect("Failed to open ticket");
 
     println!("Created a new ticket: {resource:?}");
@@ -55,6 +62,7 @@ fn main() {
         },
         &ctx,
     )
+    .await
     .expect("Failed to assign ticket");
 
     println!("Created a new ticket using assign: {resource:?}");
