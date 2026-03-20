@@ -2,19 +2,24 @@ use ash_core::{
     Context, resource,
     serde::{Deserialize, Serialize},
 };
+use uuid::Uuid;
 
 resource! {
     name = Helpdesk.Support.Ticket;
 
-    attributes = {
-        integer_primary_key id;
+    attributes {
+        ticket_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
 
-        attribute subject String;
+        subject String;
 
-        attribute status TicketStatus;
+        status TicketStatus;
     }
 
-    actions = {
+    actions {
         create open;
 
         create assign accept [ subject ];
@@ -28,15 +33,19 @@ enum TicketStatus {
     Closed,
 }
 
-resource! {
-    name = Helpdesk.Support.Representative;
-
-    attributes = {
-        integer_primary_key id;
-
-        attribute name String;
-    }
-}
+// resource! {
+//     name = Helpdesk.Support.Representative;
+//
+//     attributes {
+//         representative_id Uuid {
+//             primary_key true;
+//             writable false;
+//             default || Uuid::new_v4();
+//         }
+//
+//         name String;
+//     }
+// }
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +55,7 @@ async fn main() {
 
     ash_core::create::<Ticket, Open>(
         OpenInput {
-            subject: "Help me!".to_string(),
+            subject: "The computer does not turn on".to_string(),
             status: TicketStatus::Open,
         },
         &ctx,
@@ -58,7 +67,7 @@ async fn main() {
 
     ash_core::create::<Ticket, Assign>(
         AssignInput {
-            subject: "Help me!".to_string(),
+            subject: "My mouse does not work".to_string(),
         },
         &ctx,
     )
@@ -71,5 +80,12 @@ async fn main() {
         .await
         .expect("Failed to list tickets");
 
-    println!("Found these tickets: {tickets:?}");
+    println!("Found these tickets:\n");
+
+    for ticket in tickets {
+        println!(
+            "id: {}\n\tsubject: {}\n\tstatus: {:?}\n",
+            ticket.ticket_id, ticket.subject, ticket.status
+        )
+    }
 }

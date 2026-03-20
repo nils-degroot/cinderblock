@@ -1,11 +1,16 @@
 use core::iter::Iterator;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use syn::{Ident, Token, Type, bracketed, parse::Parse, punctuated::Punctuated};
+use syn::{
+    ExprClosure, Ident, LitBool, Token, Type, braced, bracketed, parse::Parse,
+    punctuated::Punctuated,
+};
 
 #[proc_macro]
 pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(item as ResourceMacroInput);
+
+    dbg!(&input);
 
     let ident = input.name.last().expect("Missing name segment");
 
@@ -18,21 +23,30 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let fields = input
             .attributes
             .iter()
-            .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
+            .filter(|attr| attr.primary_key.value())
             .collect::<Vec<_>>();
 
         match fields.len() {
-            0 => todo!(),
+            0 => todo!("Support no primary keys"),
             1 => {
                 let ty = fields[0].ty.clone();
                 quote::quote! { #ty }
             }
-            _ => {
-                let tys = fields.iter().map(|attr| attr.ty.clone());
-                quote::quote! {
-                    ( #(#tys),* )
-                }
-            }
+            _ => todo!("Support multiple primary keys"),
+        }
+    };
+
+    let primary_key_generated = {
+        let fields = input
+            .attributes
+            .iter()
+            .filter(|attr| attr.primary_key.value())
+            .collect::<Vec<_>>();
+
+        match fields.len() {
+            0 => todo!("Support no primary keys"),
+            1 => fields[0].generated.value(),
+            _ => todo!("Support multiple primary keys"),
         }
     };
 
@@ -40,22 +54,16 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let fields = input
             .attributes
             .iter()
-            .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
+            .filter(|attr| attr.primary_key.value())
             .collect::<Vec<_>>();
 
         match fields.len() {
-            0 => todo!(),
+            0 => todo!("Support no primary keys"),
             1 => {
                 let ty = fields[0].name.clone();
                 quote::quote! { &self.#ty }
             }
-            _ => {
-                let names = fields.iter().map(|attr| attr.name.clone());
-
-                quote::quote! {
-                    ( #(&self.#names),* )
-                }
-            }
+            _ => todo!("Support multiple primary keys"),
         }
     };
 
@@ -65,41 +73,50 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let action_name = Ident::new(&action_name, action.name.span());
             let input_name = Ident::new(&format!("{action_name}Input"), action.name.span());
 
-            let attributes = input
-                .attributes
-                .iter()
-                .filter(|attribute| attribute.kind == ResourceAttributeInputKind::Attribute);
+            let attributes = input.attributes.iter().filter(|attr| attr.writable.value());
 
-            let (present, missing) = match accept {
-                ActionCreateAccept::Default => (attributes.collect::<Vec<_>>(), vec![]),
+            let (present, mut missing_names) = match accept {
+                ActionCreateAccept::Default => (
+                    attributes
+                        .map(|attr| (attr.name.to_string(), attr))
+                        .collect::<HashMap<_, _>>(),
+                    HashMap::new(),
+                ),
                 ActionCreateAccept::Only(idents) => {
                     let idents = idents
                         .iter()
                         .map(|ident| ident.to_string())
                         .collect::<HashSet<_>>();
 
-                    attributes.fold((vec![], vec![]), |(mut present, mut missing), attr| {
-                        if idents.contains(&attr.name.to_string()) {
-                            present.push(attr);
-                        } else {
-                            missing.push(attr);
-                        }
-                        (present, missing)
-                    })
+                    attributes.fold(
+                        (HashMap::new(), HashMap::new()),
+                        |(mut present, mut missing), attr| {
+                            if idents.contains(&attr.name.to_string()) {
+                                present.insert(attr.name.to_string(), attr);
+                            } else {
+                                missing.insert(attr.name.to_string(), attr);
+                            }
+                            (present, missing)
+                        },
+                    )
                 }
             };
 
-            dbg!((&present, &missing));
-
-            let attributes = present.iter().map(|attr| attr.to_field_definition());
-            let present_names = present.iter().map(|attr| attr.name.clone());
-            let missing_names = missing.iter().map(|attr| attr.name.clone());
-
-            let pks = input
+            input
                 .attributes
                 .iter()
-                .filter(|attr| attr.kind == ResourceAttributeInputKind::PrimaryKey)
-                .map(|pk| pk.name.clone());
+                .filter(|attr| {
+                    !attr.writable.value() || !present.contains_key(&attr.name.to_string())
+                })
+                .for_each(|attr| {
+                    missing_names.insert(attr.name.to_string(), attr);
+                });
+
+            let attributes = present.values().map(|attr| attr.to_field_definition());
+
+            let missing_names = missing_names.values().map(|attr| attr.to_default());
+
+            let present_names = present.values().map(|attr| attr.name.clone());
 
             quote::quote! {
                 #[derive(::std::fmt::Debug)]
@@ -115,14 +132,11 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
                     fn from_create_input(input: Self::Input) -> Self {
                         #ident {
-                            // TODO: Properly handle PK's here
-                            #(#pks: ::std::default::Default::default(),)*
-
                             // Iterate over attributes in #action_name.
                             #(#present_names: input.#present_names,)*
 
                             // All types attributes not present in #action_name should use default
-                            #(#missing_names: ::std::default::Default::default(),)*
+                            #(#missing_names),*
                         }
                     }
                 }
@@ -146,9 +160,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             const NAME: &'static [&'static str] = &[#(#name_segments),*];
 
-            fn primary_key_strategy() -> ash_core::PrimaryKeyStrategy {
-                ash_core::PrimaryKeyStrategy::Manual
-            }
+            const PRIMARY_KEY_GENERATED: bool = #primary_key_generated;
 
             fn primary_key(&self) -> &Self::PrimaryKey {
                 #primary_key_value
@@ -169,9 +181,12 @@ struct ResourceMacroInput {
 
 #[derive(Debug)]
 struct ResourceAttributeInput {
-    kind: ResourceAttributeInputKind,
     name: Ident,
     ty: Type,
+    primary_key: LitBool,
+    generated: LitBool,
+    writable: LitBool,
+    default: Option<ExprClosure>,
 }
 
 impl ResourceAttributeInput {
@@ -183,25 +198,24 @@ impl ResourceAttributeInput {
             #name: #ty
         }
     }
-}
 
-#[derive(Debug, PartialEq, Eq)]
-enum ResourceAttributeInputKind {
-    PrimaryKey,
-    Attribute,
-}
+    fn to_default(&self) -> proc_macro2::TokenStream {
+        let name = self.name.clone();
 
-impl Parse for ResourceAttributeInputKind {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let key: Ident = input.parse()?;
+        let default = self.default.clone().map_or_else(
+            || quote::quote! { ::std::default::Default::default() },
+            |f| {
+                quote::quote! {
+                    {
+                        let create = #f;
+                        create()
+                    }
+                }
+            },
+        );
 
-        match key.to_string().as_str() {
-            "primary_key" => Ok(Self::PrimaryKey),
-            "attribute" => Ok(Self::Attribute),
-            got => Err(syn::Error::new(
-                key.span(),
-                format!("Unexpected attribute kind, got `{got}`"),
-            )),
+        quote::quote! {
+            #name: #default
         }
     }
 }
@@ -281,21 +295,55 @@ impl Parse for ResourceMacroInput {
         let _: Token![;] = input.parse()?;
 
         let _: Ident = input.parse()?; // `attributes`
-        let _: Token![=] = input.parse()?;
 
         let content;
-        syn::braced!(content in input);
+        braced!(content in input);
 
         let mut attributes = vec![];
 
         while !content.is_empty() {
-            attributes.push(ResourceAttributeInput {
-                kind: content.parse()?,
-                name: content.parse()?,
-                ty: content.parse()?,
-            });
+            let name: Ident = content.parse()?;
 
-            let _: Token![;] = content.parse()?;
+            let mut base = ResourceAttributeInput {
+                ty: content.parse()?,
+                primary_key: LitBool::new(false, name.span()),
+                generated: LitBool::new(false, name.span()),
+                writable: LitBool::new(true, name.span()),
+                default: None,
+                name,
+            };
+
+            if content.peek(Token![;]) {
+                let _: Token![;] = content.parse()?;
+                attributes.push(base);
+                continue;
+            }
+
+            let attribute_content;
+            braced!(attribute_content in content);
+
+            while !attribute_content.is_empty() {
+                let name: Ident = attribute_content.parse()?; // `attribute`
+
+                match name.to_string().as_str() {
+                    "primary_key" => base.primary_key = attribute_content.parse()?,
+                    "generated" => base.generated = attribute_content.parse()?,
+                    "writable" => base.writable = attribute_content.parse()?,
+                    "default" => base.default = Some(attribute_content.parse()?),
+                    got => Err(syn::Error::new(
+                        name.span(),
+                        format!("Unexpected attribute key, got `{got}`"),
+                    ))?,
+                }
+
+                let _: Token![;] = attribute_content.parse()?;
+            }
+
+            attributes.push(base);
+
+            if content.peek(Token![;]) {
+                let _: Token![;] = content.parse()?;
+            }
         }
 
         let mut actions = vec![];
@@ -303,10 +351,9 @@ impl Parse for ResourceMacroInput {
         if input.peek(Ident) {
             println!("Parsing actions");
             let _: Ident = input.parse()?; // `actions`
-            let _: Token![=] = input.parse()?;
 
             let content;
-            syn::braced!(content in input);
+            braced!(content in input);
 
             while !content.is_empty() {
                 actions.push(content.parse()?);

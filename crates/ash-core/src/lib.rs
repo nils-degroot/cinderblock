@@ -49,16 +49,9 @@ pub trait Resource: serde::Serialize + serde::de::DeserializeOwned + Send + Sync
 
     const NAME: &'static [&'static str];
 
-    fn primary_key_strategy() -> PrimaryKeyStrategy;
+    const PRIMARY_KEY_GENERATED: bool;
 
     fn primary_key(&self) -> &Self::PrimaryKey;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum PrimaryKeyStrategy {
-    Manual,
-    DataLayer,
-    Application,
 }
 
 pub trait Create<A>: Resource {
