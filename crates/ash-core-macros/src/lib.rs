@@ -367,3 +367,355 @@ impl Parse for ResourceMacroInput {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+
+    fn parse_resource(tokens: proc_macro2::TokenStream) -> ResourceMacroInput {
+        syn::parse2::<ResourceMacroInput>(tokens).expect("failed to parse resource DSL")
+    }
+
+    #[test]
+    fn minimal_resource_with_one_simple_attribute() {
+        let input = parse_resource(quote! {
+            name = Foo;
+
+            attributes {
+                id String;
+            }
+        });
+
+        assert_eq!(input.name.len(), 1);
+        assert_eq!(input.name[0], "Foo");
+
+        assert_eq!(input.attributes.len(), 1);
+        let attr = &input.attributes[0];
+        assert_eq!(attr.name, "id");
+        assert!(
+            !attr.primary_key.value(),
+            "primary_key should default to false"
+        );
+        assert!(!attr.generated.value(), "generated should default to false");
+        assert!(attr.writable.value(), "writable should default to true");
+        assert!(attr.default.is_none(), "default should be None");
+
+        assert!(input.actions.is_empty());
+    }
+
+    #[test]
+    fn dotted_name_parses_into_multiple_segments() {
+        let input = parse_resource(quote! {
+            name = Helpdesk.Support.Ticket;
+
+            attributes {
+                id String;
+            }
+        });
+
+        assert_eq!(input.name.len(), 3);
+        assert_eq!(input.name[0], "Helpdesk");
+        assert_eq!(input.name[1], "Support");
+        assert_eq!(input.name[2], "Ticket");
+    }
+
+    #[test]
+    fn attribute_with_options_block() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                ticket_id Uuid {
+                    primary_key true;
+                    writable false;
+                    default || uuid::Uuid::new_v4();
+                }
+            }
+        });
+
+        assert_eq!(input.attributes.len(), 1);
+        let attr = &input.attributes[0];
+        assert_eq!(attr.name, "ticket_id");
+        assert!(attr.primary_key.value());
+        assert!(!attr.writable.value());
+        assert!(attr.default.is_some());
+    }
+
+    #[test]
+    fn attribute_with_generated_flag() {
+        let input = parse_resource(quote! {
+            name = Item;
+
+            attributes {
+                item_id Uuid {
+                    primary_key true;
+                    generated true;
+                }
+            }
+        });
+
+        let attr = &input.attributes[0];
+        assert!(attr.generated.value());
+        assert!(attr.primary_key.value());
+        // writable should still be the default (true) since it wasn't set.
+        assert!(attr.writable.value());
+    }
+
+    #[test]
+    fn multiple_attributes_mixed_simple_and_complex() {
+        let input = parse_resource(quote! {
+            name = Order;
+
+            attributes {
+                order_id Uuid {
+                    primary_key true;
+                    writable false;
+                }
+                item_name String;
+                quantity u32;
+            }
+        });
+
+        assert_eq!(input.attributes.len(), 3);
+
+        assert_eq!(input.attributes[0].name, "order_id");
+        assert!(input.attributes[0].primary_key.value());
+        assert!(!input.attributes[0].writable.value());
+
+        assert_eq!(input.attributes[1].name, "item_name");
+        assert!(!input.attributes[1].primary_key.value());
+        assert!(input.attributes[1].writable.value());
+
+        assert_eq!(input.attributes[2].name, "quantity");
+        assert!(!input.attributes[2].primary_key.value());
+        assert!(input.attributes[2].writable.value());
+    }
+
+    #[test]
+    fn actions_block_with_simple_create() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+            }
+
+            actions {
+                create open;
+            }
+        });
+
+        assert_eq!(input.actions.len(), 1);
+        assert_eq!(input.actions[0].name, "open");
+        assert!(matches!(
+            &input.actions[0].kind,
+            ResourceActionInputKind::Create {
+                accept: ActionCreateAccept::Default
+            }
+        ));
+    }
+
+    #[test]
+    fn action_with_accept_list() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+            }
+
+            actions {
+                create assign accept [ subject ];
+            }
+        });
+
+        assert_eq!(input.actions.len(), 1);
+        assert_eq!(input.actions[0].name, "assign");
+        match &input.actions[0].kind {
+            ResourceActionInputKind::Create { accept } => match accept {
+                ActionCreateAccept::Only(idents) => {
+                    assert_eq!(idents.len(), 1);
+                    assert_eq!(idents[0], "subject");
+                }
+                ActionCreateAccept::Default => panic!("expected Only accept, got Default"),
+            },
+        }
+    }
+
+    #[test]
+    fn no_actions_block_omitted() {
+        let input = parse_resource(quote! {
+            name = Simple;
+
+            attributes {
+                id u64;
+            }
+        });
+
+        assert!(input.actions.is_empty());
+    }
+
+    #[test]
+    fn full_helpdesk_example() {
+        let input = parse_resource(quote! {
+            name = Helpdesk.Support.Ticket;
+
+            attributes {
+                ticket_id Uuid {
+                    primary_key true;
+                    writable false;
+                    default || uuid::Uuid::new_v4();
+                }
+
+                subject String;
+
+                status TicketStatus;
+            }
+
+            actions {
+                create open;
+
+                create assign accept [ subject ];
+            }
+        });
+
+        assert_eq!(input.name.len(), 3);
+        assert_eq!(input.name[0], "Helpdesk");
+        assert_eq!(input.name[1], "Support");
+        assert_eq!(input.name[2], "Ticket");
+
+        assert_eq!(input.attributes.len(), 3);
+
+        let ticket_id = &input.attributes[0];
+        assert_eq!(ticket_id.name, "ticket_id");
+        assert!(ticket_id.primary_key.value());
+        assert!(!ticket_id.writable.value());
+        assert!(ticket_id.default.is_some());
+
+        let subject = &input.attributes[1];
+        assert_eq!(subject.name, "subject");
+        assert!(!subject.primary_key.value());
+        assert!(subject.writable.value());
+        assert!(subject.default.is_none());
+
+        let status = &input.attributes[2];
+        assert_eq!(status.name, "status");
+        assert!(!status.primary_key.value());
+        assert!(status.writable.value());
+
+        assert_eq!(input.actions.len(), 2);
+
+        assert_eq!(input.actions[0].name, "open");
+        assert!(matches!(
+            &input.actions[0].kind,
+            ResourceActionInputKind::Create {
+                accept: ActionCreateAccept::Default
+            }
+        ));
+
+        assert_eq!(input.actions[1].name, "assign");
+        match &input.actions[1].kind {
+            ResourceActionInputKind::Create { accept } => match accept {
+                ActionCreateAccept::Only(idents) => {
+                    assert_eq!(idents.len(), 1);
+                    assert_eq!(idents[0], "subject");
+                }
+                ActionCreateAccept::Default => panic!("expected Only accept for assign action"),
+            },
+        }
+    }
+
+    #[test]
+    fn parse_simple_create_action() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            create open;
+        })
+        .expect("failed to parse action");
+
+        assert_eq!(action.name, "open");
+        assert!(matches!(
+            action.kind,
+            ResourceActionInputKind::Create {
+                accept: ActionCreateAccept::Default
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_create_action_with_multiple_accept_idents() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            create bulk_insert accept [ name email age ];
+        })
+        .expect("failed to parse action");
+
+        assert_eq!(action.name, "bulk_insert");
+        match action.kind {
+            ResourceActionInputKind::Create { accept } => match accept {
+                ActionCreateAccept::Only(idents) => {
+                    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+                    assert_eq!(names, vec!["name", "email", "age"]);
+                }
+                ActionCreateAccept::Default => panic!("expected Only accept, got Default"),
+            },
+        }
+    }
+
+    #[test]
+    fn unknown_action_kind_produces_error() {
+        let result = syn::parse2::<ResourceActionInput>(quote! {
+            update foo;
+        });
+
+        let err = result.expect_err("expected parse error for unknown action kind");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unexpected action kind"),
+            "error should mention 'Unexpected action kind', got: {msg}"
+        );
+        assert!(
+            msg.contains("update"),
+            "error should mention the invalid kind 'update', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_attribute_option_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Thing;
+
+            attributes {
+                id String {
+                    bogus true;
+                }
+            }
+        });
+
+        let err = result.expect_err("expected parse error for unknown attribute key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unexpected attribute key"),
+            "error should mention 'Unexpected attribute key', got: {msg}"
+        );
+        assert!(
+            msg.contains("bogus"),
+            "error should mention the invalid key 'bogus', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn missing_semicolon_after_name_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Foo
+
+            attributes {
+                id String;
+            }
+        });
+
+        assert!(
+            result.is_err(),
+            "expected parse error when semicolon is missing after name"
+        );
+    }
+}
