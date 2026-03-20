@@ -133,7 +133,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let name_segments = input.name.iter().map(|segment| segment.to_string());
 
     quote::quote! {
-        #[derive(::std::fmt::Debug, ash_core::serde::Serialize, ash_core::serde::Deserialize)]
+        #[derive(::std::fmt::Debug, ::std::clone::Clone, ash_core::serde::Serialize, ash_core::serde::Deserialize)]
         struct #ident {
             #(#fields),*
         }
@@ -142,9 +142,13 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             type PrimaryKey = #primary_key_type;
 
             // TODO: If the user specifies a different data layer for the resource, use that one instead.
-            type DataLayer = ash_core::data_layer::file_storage::FileStorageDataLayer;
+            type DataLayer = ash_core::data_layer::in_memory::InMemoryDataLayer;
 
             const NAME: &'static [&'static str] = &[#(#name_segments),*];
+
+            fn primary_key_strategy() -> ash_core::PrimaryKeyStrategy {
+                ash_core::PrimaryKeyStrategy::Manual
+            }
 
             fn primary_key(&self) -> &Self::PrimaryKey {
                 #primary_key_value

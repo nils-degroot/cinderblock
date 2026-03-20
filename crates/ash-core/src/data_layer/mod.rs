@@ -1,12 +1,12 @@
 use crate::Resource;
 
-pub mod file_storage;
+pub mod in_memory;
 
 pub trait DataLayer: std::fmt::Debug + Send + Sync + 'static {
-    fn get<R: Resource>(
+    fn create<R: Resource + 'static>(
         &self,
-        pk: R::PrimaryKey,
-    ) -> impl Future<Output = crate::Result<Option<R>>> + Send;
+        resource: R,
+    ) -> impl Future<Output = crate::Result<()>> + Send;
 
-    fn create<R: Resource>(&self, resource: &R) -> impl Future<Output = crate::Result<()>> + Send;
+    fn list<R: Resource + 'static>(&self) -> impl Future<Output = crate::Result<Vec<R>>> + Send;
 }

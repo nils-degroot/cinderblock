@@ -7,7 +7,7 @@ resource! {
     name = Helpdesk.Support.Ticket;
 
     attributes = {
-        primary_key id i32;
+        integer_primary_key id;
 
         attribute subject String;
 
@@ -21,7 +21,7 @@ resource! {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 enum TicketStatus {
     #[default]
     Open,
@@ -32,7 +32,7 @@ resource! {
     name = Helpdesk.Support.Representative;
 
     attributes = {
-        primary_key id i32;
+        integer_primary_key id;
 
         attribute name String;
     }
@@ -44,7 +44,7 @@ async fn main() {
         .await
         .expect("Failed to setup context");
 
-    let resource = ash_core::create::<Ticket, Open>(
+    ash_core::create::<Ticket, Open>(
         OpenInput {
             subject: "Help me!".to_string(),
             status: TicketStatus::Open,
@@ -54,9 +54,9 @@ async fn main() {
     .await
     .expect("Failed to open ticket");
 
-    println!("Created a new ticket: {resource:?}");
+    println!("Created a new ticket");
 
-    let resource = ash_core::create::<Ticket, Assign>(
+    ash_core::create::<Ticket, Assign>(
         AssignInput {
             subject: "Help me!".to_string(),
         },
@@ -65,5 +65,11 @@ async fn main() {
     .await
     .expect("Failed to assign ticket");
 
-    println!("Created a new ticket using assign: {resource:?}");
+    println!("Created a new ticket using assign");
+
+    let tickets = ash_core::list::<Ticket>(&ctx)
+        .await
+        .expect("Failed to list tickets");
+
+    println!("Found these tickets: {tickets:?}");
 }

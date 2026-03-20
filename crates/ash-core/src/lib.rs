@@ -18,19 +18,12 @@ pub struct Context {
 }
 
 impl Context {
-    pub async fn new(app_name: &str) -> Result<Self> {
+    pub async fn new(_app_name: &str) -> Result<Self> {
         let mut this = Self {
             data_layers: HashMap::new(),
         };
 
-        this.register_data_layer(
-            data_layer::file_storage::FileStorageDataLayer::new(
-                dirs2::data_local_dir()
-                    .expect("Could not get the users data directory")
-                    .join(app_name),
-            )
-            .await?,
-        );
+        this.register_data_layer(data_layer::in_memory::InMemoryDataLayer::new());
 
         Ok(this)
     }
@@ -49,14 +42,23 @@ impl Context {
     }
 }
 
-pub trait Resource: serde::Serialize + serde::de::DeserializeOwned + Send + Sync {
+pub trait Resource: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + Clone {
     type PrimaryKey: std::fmt::Display + Send + Sync;
 
     type DataLayer: DataLayer;
 
     const NAME: &'static [&'static str];
 
+    fn primary_key_strategy() -> PrimaryKeyStrategy;
+
     fn primary_key(&self) -> &Self::PrimaryKey;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PrimaryKeyStrategy {
+    Manual,
+    DataLayer,
+    Application,
 }
 
 pub trait Create<A>: Resource {
@@ -65,12 +67,20 @@ pub trait Create<A>: Resource {
     fn from_create_input(input: Self::Input) -> Self;
 }
 
-pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<R>
+pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<()>
 where
-    R: Create<A>,
+    R: Create<A> + 'static,
 {
     let resource = R::from_create_input(input);
     let dl = ctx.get_data_layer::<R::DataLayer>();
-    dl.create(&resource).await?;
-    Ok(resource)
+    dl.create(resource).await?;
+    Ok(())
+}
+
+pub async fn list<R>(ctx: &Context) -> Result<Vec<R>>
+where
+    R: Resource + 'static,
+{
+    let dl = ctx.get_data_layer::<R::DataLayer>();
+    dl.list().await
 }
