@@ -2,8 +2,8 @@ use core::iter::Iterator;
 use std::collections::{HashMap, HashSet};
 
 use syn::{
-    ExprClosure, Ident, LitBool, Token, Type, braced, bracketed, parse::Parse,
-    punctuated::Punctuated,
+    braced, bracketed, parse::Parse, punctuated::Punctuated, spanned::Spanned, ExprClosure, Ident,
+    LitBool, Token, Type,
 };
 
 #[proc_macro]
@@ -76,13 +76,13 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let attributes = input.attributes.iter().filter(|attr| attr.writable.value());
 
             let (present, mut missing_names) = match accept {
-                ActionCreateAccept::Default => (
+                Accept::Default => (
                     attributes
                         .map(|attr| (attr.name.to_string(), attr))
                         .collect::<HashMap<_, _>>(),
                     HashMap::new(),
                 ),
-                ActionCreateAccept::Only(idents) => {
+                Accept::Only(idents) => {
                     let idents = idents
                         .iter()
                         .map(|ident| ident.to_string())
@@ -138,6 +138,85 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             // All types attributes not present in #action_name should use default
                             #(#missing_names),*
                         }
+                    }
+                }
+            }
+        }
+        ResourceActionInputKind::Update(update) => {
+            let action_name = convert_case::ccase!(pascal, action.name.to_string());
+            let action_name = Ident::new(&action_name, action.name.span());
+            let input_name = Ident::new(&format!("{action_name}Input"), action.name.span());
+
+            let attributes = input.attributes.iter().filter(|attr| attr.writable.value());
+
+            let present = match &update.accept {
+                Accept::Default => attributes.collect::<Vec<_>>(),
+                Accept::Only(idents) => {
+                    let idents = idents
+                        .iter()
+                        .map(|ident| ident.to_string())
+                        .collect::<HashSet<_>>();
+
+                    attributes
+                        .filter(|attr| idents.contains(&attr.name.to_string()))
+                        .collect()
+                }
+            };
+
+            let field_definitions = present.iter().map(|attr| attr.to_field_definition());
+
+            // # Field assignment generation
+            //
+            // Each accepted field from the input struct gets assigned onto `self`
+            // in the generated `apply_update_input` method.
+            let field_assignments = present.iter().map(|attr| {
+                let name = &attr.name;
+                quote::quote! { self.#name = input.#name; }
+            });
+
+            // # Change closure generation
+            //
+            // Each `change_ref` closure is emitted as a typed closure bound to a
+            // variable, then called with `self`. We inject `&mut Self` as the
+            // parameter type so field access resolves without the user needing
+            // to annotate the type in the DSL.
+            let change_ref_calls =
+                update
+                    .changes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, change)| match change {
+                        UpdateChange::ChangeRef(closure) => {
+                            let param = closure
+                                .inputs
+                                .first()
+                                .expect("change_ref closure must have exactly one parameter");
+                            let body = &closure.body;
+                            let binding = Ident::new(&format!("change_ref_{i}"), param.span());
+                            Some(quote::quote! {
+                                let #binding = |#param: &mut Self| #body;
+                                #binding(self);
+                            })
+                        }
+                        // TODO: support `change` (by-value) variant
+                        UpdateChange::Change(_) => None,
+                    });
+
+            quote::quote! {
+                #[derive(::std::fmt::Debug)]
+                struct #action_name;
+
+                #[derive(::std::fmt::Debug)]
+                struct #input_name {
+                    #(pub #field_definitions),*
+                }
+
+                impl ash_core::Update<#action_name> for #ident {
+                    type Input = #input_name;
+
+                    fn apply_update_input(&mut self, input: Self::Input) {
+                        #(#field_assignments)*
+                        #(#change_ref_calls)*
                     }
                 }
             }
@@ -237,7 +316,7 @@ impl Parse for ResourceActionInput {
                     let _: Token![;] = input.parse()?;
 
                     ResourceActionInputKind::Create {
-                        accept: ActionCreateAccept::Default,
+                        accept: Accept::Default,
                     }
                 } else {
                     // TODO: Verify this
@@ -255,8 +334,65 @@ impl Parse for ResourceActionInput {
                     let _: Token![;] = input.parse()?;
 
                     ResourceActionInputKind::Create {
-                        accept: ActionCreateAccept::Only(idents),
+                        accept: Accept::Only(idents),
                     }
+                }
+            }
+            "update" => {
+                if input.peek(Token![;]) {
+                    let _: Token![;] = input.parse()?;
+
+                    ResourceActionInputKind::Update(ActionUpdate {
+                        accept: Accept::Default,
+                        changes: vec![],
+                    })
+                } else {
+                    let content;
+                    braced!(content in input);
+
+                    let mut action = ActionUpdate {
+                        accept: Accept::Default,
+                        changes: vec![],
+                    };
+
+                    while !content.is_empty() {
+                        let key: Ident = content.parse()?;
+
+                        match key.to_string().as_str() {
+                            "accept" => {
+                                let accept_content;
+                                bracketed!(accept_content in content);
+
+                                action.accept = Accept::Only(
+                                    accept_content
+                                        .parse_terminated(Ident::parse, Token![,])?
+                                        .into_iter()
+                                        .collect(),
+                                );
+
+                                let _: Token![;] = content.parse()?;
+                            }
+                            "change_ref" => {
+                                let closure: ExprClosure = content.parse()?;
+                                action.changes.push(UpdateChange::ChangeRef(closure));
+                                let _: Token![;] = content.parse()?;
+                            }
+                            got => {
+                                return Err(syn::Error::new(
+                                    key.span(),
+                                    format!("Unexpected update keyword, got `{got}`"),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Consume optional trailing semicolon after the closing brace,
+                    // allowing both `update close { ... }` and `update close { ... };`.
+                    if input.peek(Token![;]) {
+                        let _: Token![;] = input.parse()?;
+                    }
+
+                    ResourceActionInputKind::Update(action)
                 }
             }
             got => {
@@ -273,13 +409,28 @@ impl Parse for ResourceActionInput {
 
 #[derive(Debug)]
 enum ResourceActionInputKind {
-    Create { accept: ActionCreateAccept },
+    Create { accept: Accept },
+    Update(ActionUpdate),
 }
 
 #[derive(Debug)]
-enum ActionCreateAccept {
+struct ActionUpdate {
+    accept: Accept,
+    changes: Vec<UpdateChange>,
+}
+
+#[derive(Debug)]
+enum Accept {
     Default,
     Only(Vec<Ident>),
+}
+
+#[derive(Debug)]
+enum UpdateChange {
+    // TODO: support `change` (by-value) variant once needed
+    #[expect(dead_code)]
+    Change(ExprClosure),
+    ChangeRef(ExprClosure),
 }
 
 impl Parse for ResourceMacroInput {
@@ -511,7 +662,7 @@ mod tests {
         assert!(matches!(
             &input.actions[0].kind,
             ResourceActionInputKind::Create {
-                accept: ActionCreateAccept::Default
+                accept: Accept::Default
             }
         ));
     }
@@ -534,12 +685,15 @@ mod tests {
         assert_eq!(input.actions[0].name, "assign");
         match &input.actions[0].kind {
             ResourceActionInputKind::Create { accept } => match accept {
-                ActionCreateAccept::Only(idents) => {
+                Accept::Only(idents) => {
                     assert_eq!(idents.len(), 1);
                     assert_eq!(idents[0], "subject");
                 }
-                ActionCreateAccept::Default => panic!("expected Only accept, got Default"),
+                Accept::Default => panic!("expected Only accept, got Default"),
             },
+            ResourceActionInputKind::Update(_) => {
+                todo!()
+            }
         }
     }
 
@@ -610,19 +764,22 @@ mod tests {
         assert!(matches!(
             &input.actions[0].kind,
             ResourceActionInputKind::Create {
-                accept: ActionCreateAccept::Default
+                accept: Accept::Default
             }
         ));
 
         assert_eq!(input.actions[1].name, "assign");
         match &input.actions[1].kind {
             ResourceActionInputKind::Create { accept } => match accept {
-                ActionCreateAccept::Only(idents) => {
+                Accept::Only(idents) => {
                     assert_eq!(idents.len(), 1);
                     assert_eq!(idents[0], "subject");
                 }
-                ActionCreateAccept::Default => panic!("expected Only accept for assign action"),
+                Accept::Default => panic!("expected Only accept for assign action"),
             },
+            ResourceActionInputKind::Update(_) => {
+                todo!()
+            }
         }
     }
 
@@ -637,7 +794,7 @@ mod tests {
         assert!(matches!(
             action.kind,
             ResourceActionInputKind::Create {
-                accept: ActionCreateAccept::Default
+                accept: Accept::Default
             }
         ));
     }
@@ -652,19 +809,20 @@ mod tests {
         assert_eq!(action.name, "bulk_insert");
         match action.kind {
             ResourceActionInputKind::Create { accept } => match accept {
-                ActionCreateAccept::Only(idents) => {
+                Accept::Only(idents) => {
                     let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
                     assert_eq!(names, vec!["name", "email", "age"]);
                 }
-                ActionCreateAccept::Default => panic!("expected Only accept, got Default"),
+                Accept::Default => panic!("expected Only accept, got Default"),
             },
+            ResourceActionInputKind::Update(_) => todo!(),
         }
     }
 
     #[test]
     fn unknown_action_kind_produces_error() {
         let result = syn::parse2::<ResourceActionInput>(quote! {
-            update foo;
+            destroy foo;
         });
 
         let err = result.expect_err("expected parse error for unknown action kind");
@@ -674,8 +832,8 @@ mod tests {
             "error should mention 'Unexpected action kind', got: {msg}"
         );
         assert!(
-            msg.contains("update"),
-            "error should mention the invalid kind 'update', got: {msg}"
+            msg.contains("destroy"),
+            "error should mention the invalid kind 'destroy', got: {msg}"
         );
     }
 
@@ -717,5 +875,81 @@ mod tests {
             result.is_err(),
             "expected parse error when semicolon is missing after name"
         );
+    }
+
+    #[test]
+    fn parse_simple_update_action_with_default_accept() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            update close;
+        })
+        .expect("failed to parse update action");
+
+        assert_eq!(action.name, "close");
+        match &action.kind {
+            ResourceActionInputKind::Update(update) => {
+                assert!(
+                    matches!(update.accept, Accept::Default),
+                    "expected default accept"
+                );
+                assert!(update.changes.is_empty());
+            }
+            _ => panic!("expected Update action kind"),
+        }
+    }
+
+    #[test]
+    fn parse_update_action_with_accept_and_change_ref() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            update close {
+                accept [];
+                change_ref |resource| {
+                    resource.status = TicketStatus::Closed;
+                };
+            }
+        })
+        .expect("failed to parse update action with change_ref");
+
+        assert_eq!(action.name, "close");
+        match &action.kind {
+            ResourceActionInputKind::Update(update) => {
+                match &update.accept {
+                    Accept::Only(idents) => {
+                        assert!(idents.is_empty(), "expected empty accept list")
+                    }
+                    Accept::Default => panic!("expected Only accept, got Default"),
+                }
+                assert_eq!(update.changes.len(), 1);
+                assert!(
+                    matches!(update.changes[0], UpdateChange::ChangeRef(_)),
+                    "expected ChangeRef variant"
+                );
+            }
+            _ => panic!("expected Update action kind"),
+        }
+    }
+
+    #[test]
+    fn parse_update_action_with_accept_fields() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            update reassign {
+                accept [subject, status];
+            }
+        })
+        .expect("failed to parse update action with accept fields");
+
+        assert_eq!(action.name, "reassign");
+        match &action.kind {
+            ResourceActionInputKind::Update(update) => {
+                match &update.accept {
+                    Accept::Only(idents) => {
+                        let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+                        assert_eq!(names, vec!["subject", "status"]);
+                    }
+                    Accept::Default => panic!("expected Only accept, got Default"),
+                }
+                assert!(update.changes.is_empty());
+            }
+            _ => panic!("expected Update action kind"),
+        }
     }
 }

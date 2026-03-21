@@ -35,6 +35,42 @@ impl DataLayer for InMemoryDataLayer {
         Ok(())
     }
 
+    async fn read<R: crate::Resource + 'static>(
+        &self,
+        primary_key: &R::PrimaryKey,
+    ) -> crate::Result<R> {
+        let state = STATE.clone();
+        let state = state.read().await;
+
+        let key = primary_key.to_string();
+
+        state
+            .get(&TypeId::of::<R>())
+            .and_then(|map| map.get(&key))
+            .and_then(|boxed| boxed.downcast_ref::<R>())
+            .map(R::clone)
+            .ok_or_else(|| format!("resource not found for primary key `{key}`").into())
+    }
+
+    async fn update<R: crate::Resource + 'static>(&self, resource: R) -> crate::Result<()> {
+        let state = STATE.clone();
+        let mut state = state.write().await;
+
+        let key = resource.primary_key().to_string();
+
+        let map = state
+            .get_mut(&resource.type_id())
+            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+
+        if !map.contains_key(&key) {
+            return Err(format!("resource not found for primary key `{key}`").into());
+        }
+
+        map.insert(key, Box::new(resource.clone()));
+
+        Ok(())
+    }
+
     async fn list<R: crate::Resource + 'static>(&self) -> crate::Result<Vec<R>> {
         let state = STATE.clone();
         let state = state.read().await;

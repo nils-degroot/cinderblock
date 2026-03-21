@@ -23,6 +23,14 @@ resource! {
         create open;
 
         create assign accept [ subject ];
+
+        update close {
+            accept [];
+
+            change_ref |ticket| {
+                ticket.status = TicketStatus::Closed;
+            };
+        };
     }
 }
 
@@ -32,20 +40,6 @@ enum TicketStatus {
     Open,
     Closed,
 }
-
-// resource! {
-//     name = Helpdesk.Support.Representative;
-//
-//     attributes {
-//         representative_id Uuid {
-//             primary_key true;
-//             writable false;
-//             default || Uuid::new_v4();
-//         }
-//
-//         name String;
-//     }
-// }
 
 #[tokio::main]
 async fn main() {
@@ -82,7 +76,30 @@ async fn main() {
 
     println!("Found these tickets:\n");
 
-    for ticket in tickets {
+    for ticket in &tickets {
+        println!(
+            "id: {}\n\tsubject: {}\n\tstatus: {:?}\n",
+            ticket.ticket_id, ticket.subject, ticket.status
+        )
+    }
+
+    // Close the first ticket using the update action.
+    let first_ticket = &tickets[0];
+    println!("Closing ticket: {}", first_ticket.ticket_id);
+
+    ash_core::update::<Ticket, Close>(&first_ticket.ticket_id, CloseInput {}, &ctx)
+        .await
+        .expect("Failed to close ticket");
+
+    println!("Ticket closed\n");
+
+    let tickets = ash_core::list::<Ticket>(&ctx)
+        .await
+        .expect("Failed to list tickets");
+
+    println!("Tickets after closing:\n");
+
+    for ticket in &tickets {
         println!(
             "id: {}\n\tsubject: {}\n\tstatus: {:?}\n",
             ticket.ticket_id, ticket.subject, ticket.status
