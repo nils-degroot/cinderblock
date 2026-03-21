@@ -25,11 +25,12 @@ use syn::{
 
 /// Top-level input parsed from the `resource!` macro invocation.
 ///
-/// Represents the full DSL including name, attributes, actions, and an
-/// optional extensions block.
+/// Represents the full DSL including name, attributes, actions, an
+/// optional data layer path, and an optional extensions block.
 #[derive(Debug)]
 pub struct ResourceMacroInput {
     pub name: Vec<Ident>,
+    pub data_layer: Option<syn::Path>,
     pub attributes: Vec<ResourceAttributeInput>,
     pub actions: Vec<ResourceActionInput>,
     pub extensions: Vec<ExtensionDecl>,
@@ -358,6 +359,29 @@ impl Parse for ResourceMacroInput {
 
         let _: Token![;] = input.parse()?;
 
+        // # Data layer (optional)
+        //
+        // Parses `data_layer = some::path::SqliteDataLayer;` if present.
+        // When omitted, the `resource!` macro defaults to `InMemoryDataLayer`.
+        let data_layer = {
+            let fork = input.fork();
+            if let Ok(ident) = fork.parse::<Ident>() {
+                if ident == "data_layer" {
+                    // Consume from the real stream now that we've confirmed
+                    // the keyword.
+                    let _: Ident = input.parse()?;
+                    let _: Token![=] = input.parse()?;
+                    let path: syn::Path = input.parse()?;
+                    let _: Token![;] = input.parse()?;
+                    Some(path)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
         // # Attributes block
         //
         // Parses `attributes { <attr_declarations> }`.
@@ -474,6 +498,7 @@ impl Parse for ResourceMacroInput {
 
         Ok(ResourceMacroInput {
             name,
+            data_layer,
             attributes,
             actions,
             extensions,
@@ -545,6 +570,36 @@ mod tests {
 
         check!(input.actions.is_empty());
         check!(input.extensions.is_empty());
+        check!(input.data_layer.is_none());
+    }
+
+    #[test]
+    fn data_layer_keyword_parses_path() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+            data_layer = ash_sqlx::sqlite::SqliteDataLayer;
+
+            attributes {
+                id String;
+            }
+        });
+
+        assert!(let Some(path) = &input.data_layer);
+        let path_str = quote::quote! { #path }.to_string();
+        check!(path_str.contains("SqliteDataLayer"));
+    }
+
+    #[test]
+    fn data_layer_keyword_is_optional() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+            }
+        });
+
+        check!(input.data_layer.is_none());
     }
 
     #[test]

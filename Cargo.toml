@@ -5,7 +5,7 @@ members = [
 	"crates/ash-core-macros",
 	"crates/ash-extension-api",
 	"crates/ash-json-api",
-	"crates/ash-json-api-macros",
+	"crates/ash-json-api-macros", "crates/ash-sqlx", "crates/ash-sqlx-macros",
 ]
 
 [workspace.package]

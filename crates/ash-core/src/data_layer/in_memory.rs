@@ -21,12 +21,12 @@ impl InMemoryDataLayer {
     }
 }
 
-impl DataLayer for InMemoryDataLayer {
-    async fn create<R: crate::Resource + 'static>(&self, resource: R) -> crate::Result<()> {
+impl<R: crate::Resource + 'static> DataLayer<R> for InMemoryDataLayer {
+    async fn create(&self, resource: R) -> crate::Result<()> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
-        let map = state.entry(resource.type_id()).or_default();
+        let map = state.entry(TypeId::of::<R>()).or_default();
         map.insert(
             resource.primary_key().to_string(),
             Box::new(resource.clone()),
@@ -35,10 +35,7 @@ impl DataLayer for InMemoryDataLayer {
         Ok(())
     }
 
-    async fn read<R: crate::Resource + 'static>(
-        &self,
-        primary_key: &R::PrimaryKey,
-    ) -> crate::Result<R> {
+    async fn read(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {
         let state = STATE.clone();
         let state = state.read().await;
 
@@ -48,18 +45,18 @@ impl DataLayer for InMemoryDataLayer {
             .get(&TypeId::of::<R>())
             .and_then(|map| map.get(&key))
             .and_then(|boxed| boxed.downcast_ref::<R>())
-            .map(R::clone)
+            .cloned()
             .ok_or_else(|| format!("resource not found for primary key `{key}`").into())
     }
 
-    async fn update<R: crate::Resource + 'static>(&self, resource: R) -> crate::Result<()> {
+    async fn update(&self, resource: R) -> crate::Result<()> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
         let key = resource.primary_key().to_string();
 
         let map = state
-            .get_mut(&resource.type_id())
+            .get_mut(&TypeId::of::<R>())
             .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
 
         if !map.contains_key(&key) {
@@ -71,7 +68,7 @@ impl DataLayer for InMemoryDataLayer {
         Ok(())
     }
 
-    async fn list<R: crate::Resource + 'static>(&self) -> crate::Result<Vec<R>> {
+    async fn list(&self) -> crate::Result<Vec<R>> {
         let state = STATE.clone();
         let state = state.read().await;
 
@@ -86,10 +83,7 @@ impl DataLayer for InMemoryDataLayer {
             .unwrap_or_default())
     }
 
-    async fn destroy<R: crate::Resource + 'static>(
-        &self,
-        primary_key: &R::PrimaryKey,
-    ) -> crate::Result<R> {
+    async fn destroy(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {
         let state = STATE.clone();
         let mut state = state.write().await;
 

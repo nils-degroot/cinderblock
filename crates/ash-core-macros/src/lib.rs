@@ -243,6 +243,15 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let name_segments = input.name.iter().map(|segment| segment.to_string());
 
+    // # Data layer selection
+    //
+    // If the user specified `data_layer = some::Path;` in the DSL, use that
+    // path. Otherwise default to the built-in in-memory data layer.
+    let data_layer_path = input.data_layer.map_or_else(
+        || quote::quote! { ash_core::data_layer::in_memory::InMemoryDataLayer },
+        |path| quote::quote! { #path },
+    );
+
     // # Extension forwarding
     //
     // For each declared extension, we forward the raw DSL tokens (captured
@@ -274,8 +283,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         impl ash_core::Resource for #ident {
             type PrimaryKey = #primary_key_type;
 
-            // TODO: If the user specifies a different data layer for the resource, use that one instead.
-            type DataLayer = ash_core::data_layer::in_memory::InMemoryDataLayer;
+            type DataLayer = #data_layer_path;
 
             const NAME: &'static [&'static str] = &[#(#name_segments),*];
 

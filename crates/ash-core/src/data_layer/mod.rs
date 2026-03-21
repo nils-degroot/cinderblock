@@ -2,26 +2,23 @@ use crate::Resource;
 
 pub mod in_memory;
 
-pub trait DataLayer: std::fmt::Debug + Send + Sync + 'static {
-    fn create<R: Resource + 'static>(
-        &self,
-        resource: R,
-    ) -> impl Future<Output = crate::Result<()>> + Send;
+/// Persistence backend for a specific resource type.
+///
+/// The trait is parameterized on `R` so that different data layers can
+/// impose different bounds on the resources they support. For example,
+/// `InMemoryDataLayer` has a blanket impl for all `R: Resource`, while
+/// a SQLite data layer can additionally require `R: SqlResource`.
+pub trait DataLayer<R: Resource>: std::fmt::Debug + Send + Sync + 'static {
+    fn create(&self, resource: R) -> impl Future<Output = crate::Result<()>> + Send;
 
-    fn read<R: Resource + 'static>(
-        &self,
-        primary_key: &R::PrimaryKey,
-    ) -> impl Future<Output = crate::Result<R>> + Send;
+    fn read(&self, primary_key: &R::PrimaryKey) -> impl Future<Output = crate::Result<R>> + Send;
 
-    fn update<R: Resource + 'static>(
-        &self,
-        resource: R,
-    ) -> impl Future<Output = crate::Result<()>> + Send;
+    fn update(&self, resource: R) -> impl Future<Output = crate::Result<()>> + Send;
 
-    fn list<R: Resource + 'static>(&self) -> impl Future<Output = crate::Result<Vec<R>>> + Send;
+    fn list(&self) -> impl Future<Output = crate::Result<Vec<R>>> + Send;
 
     /// Remove a resource by primary key, returning the deleted resource.
-    fn destroy<R: Resource + 'static>(
+    fn destroy(
         &self,
         primary_key: &R::PrimaryKey,
     ) -> impl Future<Output = crate::Result<R>> + Send;

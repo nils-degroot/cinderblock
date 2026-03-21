@@ -28,24 +28,35 @@ impl Context {
         Ok(this)
     }
 
-    pub fn register_data_layer<DL: DataLayer>(&mut self, data_layer: DL) {
+    /// Register a data layer instance so resources can look it up at runtime.
+    ///
+    /// The data layer is stored by its concrete `TypeId` and retrieved via
+    /// `get_data_layer::<DL>()`. Any type that is `Debug + Send + Sync + 'static`
+    /// can be registered — the `DataLayer<R>` bound is only checked at the
+    /// call site when a resource actually uses it.
+    pub fn register_data_layer<DL: std::fmt::Debug + Send + Sync + 'static>(
+        &mut self,
+        data_layer: DL,
+    ) {
         self.data_layers
             .insert(data_layer.type_id(), Box::new(data_layer));
     }
 
-    pub fn get_data_layer<DL: DataLayer>(&self) -> &DL {
+    pub fn get_data_layer<DL: 'static>(&self) -> &DL {
         self.data_layers
             .get(&TypeId::of::<DL>())
             .expect("Requested data layer was not registered")
             .downcast_ref()
-            .expect("Could not downcast value stored daya layer")
+            .expect("Could not downcast value stored in data layer")
     }
 }
 
-pub trait Resource: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + Clone {
+pub trait Resource:
+    serde::Serialize + serde::de::DeserializeOwned + Send + Sync + Clone + 'static
+{
     type PrimaryKey: std::fmt::Display + serde::de::DeserializeOwned + Send + Sync;
 
-    type DataLayer: DataLayer;
+    type DataLayer: DataLayer<Self>;
 
     const NAME: &'static [&'static str];
 
@@ -73,7 +84,7 @@ pub trait Destroy<A>: Resource {}
 
 pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<R>
 where
-    R: Create<A> + 'static,
+    R: Create<A>,
 {
     let resource = R::from_create_input(input);
     let dl = ctx.get_data_layer::<R::DataLayer>();
@@ -83,10 +94,10 @@ where
 
 pub async fn update<R, A>(primary_key: &R::PrimaryKey, input: R::Input, ctx: &Context) -> Result<R>
 where
-    R: Update<A> + 'static,
+    R: Update<A>,
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
-    let mut resource = dl.read::<R>(primary_key).await?;
+    let mut resource = dl.read(primary_key).await?;
     resource.apply_update_input(input);
     dl.update(resource.clone()).await?;
     Ok(resource)
@@ -94,7 +105,7 @@ where
 
 pub async fn list<R>(ctx: &Context) -> Result<Vec<R>>
 where
-    R: Resource + 'static,
+    R: Resource,
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
     dl.list().await
@@ -102,7 +113,7 @@ where
 
 pub async fn destroy<R, A>(primary_key: &R::PrimaryKey, ctx: &Context) -> Result<R>
 where
-    R: Destroy<A> + 'static,
+    R: Destroy<A>,
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
     dl.destroy(primary_key).await
