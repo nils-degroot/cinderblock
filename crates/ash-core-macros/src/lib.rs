@@ -1,16 +1,18 @@
 use core::iter::Iterator;
 use std::collections::{HashMap, HashSet};
 
-use syn::{
-    braced, bracketed, parse::Parse, punctuated::Punctuated, spanned::Spanned, ExprClosure, Ident,
-    LitBool, Token, Type,
+use ash_extension_api::{
+    Accept, ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput, UpdateChange,
 };
+use syn::{spanned::Spanned, Ident};
 
 #[proc_macro]
 pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let input = syn::parse_macro_input!(item as ResourceMacroInput);
+    // Capture the raw input tokens before parsing so we can forward them
+    // verbatim to extension macros without a reconstruct roundtrip.
+    let raw_tokens: proc_macro2::TokenStream = item.clone().into();
 
-    dbg!(&input);
+    let input = syn::parse_macro_input!(item as ResourceMacroInput);
 
     let ident = input.name.last().expect("Missing name segment");
 
@@ -122,7 +124,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 #[derive(::std::fmt::Debug)]
                 struct #action_name;
 
-                #[derive(::std::fmt::Debug)]
+                #[derive(::std::fmt::Debug, ash_core::serde::Deserialize)]
                 struct #input_name {
                     #(pub #attributes),*
                 }
@@ -206,7 +208,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 #[derive(::std::fmt::Debug)]
                 struct #action_name;
 
-                #[derive(::std::fmt::Debug)]
+                #[derive(::std::fmt::Debug, ash_core::serde::Deserialize)]
                 struct #input_name {
                     #(pub #field_definitions),*
                 }
@@ -224,6 +226,28 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     });
 
     let name_segments = input.name.iter().map(|segment| segment.to_string());
+
+    // # Extension forwarding
+    //
+    // For each declared extension, we forward the raw DSL tokens (captured
+    // before parsing) inside a braced group, followed by a `config = { ... }`
+    // block containing the extension-specific configuration. This avoids a
+    // parse-then-reconstruct roundtrip — the extension macro receives the
+    // exact tokens the user wrote.
+    let extension_calls = input.extensions.iter().map(|ext| {
+        let path = &ext.path;
+        let config_tokens = &ext.config_tokens;
+
+        quote::quote! {
+            #path::__resource_extension! {
+                { #raw_tokens }
+
+                config = {
+                    #config_tokens
+                }
+            }
+        }
+    });
 
     quote::quote! {
         #[derive(::std::fmt::Debug, ::std::clone::Clone, ash_core::serde::Serialize, ash_core::serde::Deserialize)]
@@ -247,302 +271,16 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
 
         #(#actions)*
+
+        #(#extension_calls)*
     }
     .into()
-}
-
-#[derive(Debug)]
-struct ResourceMacroInput {
-    name: Vec<Ident>,
-    attributes: Vec<ResourceAttributeInput>,
-    actions: Vec<ResourceActionInput>,
-}
-
-#[derive(Debug)]
-struct ResourceAttributeInput {
-    name: Ident,
-    ty: Type,
-    primary_key: LitBool,
-    generated: LitBool,
-    writable: LitBool,
-    default: Option<ExprClosure>,
-}
-
-impl ResourceAttributeInput {
-    fn to_field_definition(&self) -> proc_macro2::TokenStream {
-        let name = self.name.clone();
-        let ty = self.ty.clone();
-
-        quote::quote! {
-            #name: #ty
-        }
-    }
-
-    fn to_default(&self) -> proc_macro2::TokenStream {
-        let name = self.name.clone();
-
-        let default = self.default.clone().map_or_else(
-            || quote::quote! { ::std::default::Default::default() },
-            |f| {
-                quote::quote! {
-                    {
-                        let create = #f;
-                        create()
-                    }
-                }
-            },
-        );
-
-        quote::quote! {
-            #name: #default
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ResourceActionInput {
-    kind: ResourceActionInputKind,
-    name: Ident,
-}
-
-impl Parse for ResourceActionInput {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let kind: Ident = input.parse()?;
-        let name: Ident = input.parse()?;
-
-        let kind = match kind.to_string().as_str() {
-            "create" => {
-                if input.peek(Token![;]) {
-                    let _: Token![;] = input.parse()?;
-
-                    ResourceActionInputKind::Create {
-                        accept: Accept::Default,
-                    }
-                } else {
-                    let content;
-                    braced!(content in input);
-
-                    let mut accept = Accept::Default;
-
-                    while !content.is_empty() {
-                        let key: Ident = content.parse()?;
-
-                        match key.to_string().as_str() {
-                            "accept" => {
-                                let accept_content;
-                                bracketed!(accept_content in content);
-
-                                accept = Accept::Only(
-                                    accept_content
-                                        .parse_terminated(Ident::parse, Token![,])?
-                                        .into_iter()
-                                        .collect(),
-                                );
-
-                                let _: Token![;] = content.parse()?;
-                            }
-                            got => {
-                                return Err(syn::Error::new(
-                                    key.span(),
-                                    format!("Unexpected create keyword, got `{got}`"),
-                                ));
-                            }
-                        }
-                    }
-
-                    // Consume optional trailing semicolon after the closing brace,
-                    // allowing both `create open { ... }` and `create open { ... };`.
-                    if input.peek(Token![;]) {
-                        let _: Token![;] = input.parse()?;
-                    }
-
-                    ResourceActionInputKind::Create { accept }
-                }
-            }
-            "update" => {
-                if input.peek(Token![;]) {
-                    let _: Token![;] = input.parse()?;
-
-                    ResourceActionInputKind::Update(ActionUpdate {
-                        accept: Accept::Default,
-                        changes: vec![],
-                    })
-                } else {
-                    let content;
-                    braced!(content in input);
-
-                    let mut action = ActionUpdate {
-                        accept: Accept::Default,
-                        changes: vec![],
-                    };
-
-                    while !content.is_empty() {
-                        let key: Ident = content.parse()?;
-
-                        match key.to_string().as_str() {
-                            "accept" => {
-                                let accept_content;
-                                bracketed!(accept_content in content);
-
-                                action.accept = Accept::Only(
-                                    accept_content
-                                        .parse_terminated(Ident::parse, Token![,])?
-                                        .into_iter()
-                                        .collect(),
-                                );
-
-                                let _: Token![;] = content.parse()?;
-                            }
-                            "change_ref" => {
-                                let closure: ExprClosure = content.parse()?;
-                                action.changes.push(UpdateChange::ChangeRef(closure));
-                                let _: Token![;] = content.parse()?;
-                            }
-                            got => {
-                                return Err(syn::Error::new(
-                                    key.span(),
-                                    format!("Unexpected update keyword, got `{got}`"),
-                                ));
-                            }
-                        }
-                    }
-
-                    // Consume optional trailing semicolon after the closing brace,
-                    // allowing both `update close { ... }` and `update close { ... };`.
-                    if input.peek(Token![;]) {
-                        let _: Token![;] = input.parse()?;
-                    }
-
-                    ResourceActionInputKind::Update(action)
-                }
-            }
-            got => {
-                return Err(syn::Error::new(
-                    kind.span(),
-                    format!("Unexpected action kind, got `{got}`"),
-                ));
-            }
-        };
-
-        Ok(ResourceActionInput { kind, name })
-    }
-}
-
-#[derive(Debug)]
-enum ResourceActionInputKind {
-    Create { accept: Accept },
-    Update(ActionUpdate),
-}
-
-#[derive(Debug)]
-struct ActionUpdate {
-    accept: Accept,
-    changes: Vec<UpdateChange>,
-}
-
-#[derive(Debug)]
-enum Accept {
-    Default,
-    Only(Vec<Ident>),
-}
-
-#[derive(Debug)]
-enum UpdateChange {
-    // TODO: support `change` (by-value) variant once needed
-    #[expect(dead_code)]
-    Change(ExprClosure),
-    ChangeRef(ExprClosure),
-}
-
-impl Parse for ResourceMacroInput {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let _: Ident = input.parse()?; // `name`
-        let _: Token![=] = input.parse()?;
-
-        let name = Punctuated::<Ident, Token![.]>::parse_separated_nonempty(input)?
-            .into_pairs()
-            .map(|v| v.into_value())
-            .collect::<Vec<_>>();
-
-        let _: Token![;] = input.parse()?;
-
-        let _: Ident = input.parse()?; // `attributes`
-
-        let content;
-        braced!(content in input);
-
-        let mut attributes = vec![];
-
-        while !content.is_empty() {
-            let name: Ident = content.parse()?;
-
-            let mut base = ResourceAttributeInput {
-                ty: content.parse()?,
-                primary_key: LitBool::new(false, name.span()),
-                generated: LitBool::new(false, name.span()),
-                writable: LitBool::new(true, name.span()),
-                default: None,
-                name,
-            };
-
-            if content.peek(Token![;]) {
-                let _: Token![;] = content.parse()?;
-                attributes.push(base);
-                continue;
-            }
-
-            let attribute_content;
-            braced!(attribute_content in content);
-
-            while !attribute_content.is_empty() {
-                let name: Ident = attribute_content.parse()?; // `attribute`
-
-                match name.to_string().as_str() {
-                    "primary_key" => base.primary_key = attribute_content.parse()?,
-                    "generated" => base.generated = attribute_content.parse()?,
-                    "writable" => base.writable = attribute_content.parse()?,
-                    "default" => base.default = Some(attribute_content.parse()?),
-                    got => Err(syn::Error::new(
-                        name.span(),
-                        format!("Unexpected attribute key, got `{got}`"),
-                    ))?,
-                }
-
-                let _: Token![;] = attribute_content.parse()?;
-            }
-
-            attributes.push(base);
-
-            if content.peek(Token![;]) {
-                let _: Token![;] = content.parse()?;
-            }
-        }
-
-        let mut actions = vec![];
-
-        if input.peek(Ident) {
-            println!("Parsing actions");
-            let _: Ident = input.parse()?; // `actions`
-
-            let content;
-            braced!(content in input);
-
-            while !content.is_empty() {
-                actions.push(content.parse()?);
-            }
-        }
-
-        Ok(ResourceMacroInput {
-            name,
-            attributes,
-            actions,
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ash_extension_api::ResourceActionInput;
     use quote::quote;
 
     fn parse_resource(tokens: proc_macro2::TokenStream) -> ResourceMacroInput {

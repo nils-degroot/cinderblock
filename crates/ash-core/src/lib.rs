@@ -43,7 +43,7 @@ impl Context {
 }
 
 pub trait Resource: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + Clone {
-    type PrimaryKey: std::fmt::Display + Send + Sync;
+    type PrimaryKey: std::fmt::Display + serde::de::DeserializeOwned + Send + Sync;
 
     type DataLayer: DataLayer;
 
@@ -66,25 +66,25 @@ pub trait Update<A>: Resource {
     fn apply_update_input(&mut self, input: Self::Input);
 }
 
-pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<()>
+pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<R>
 where
     R: Create<A> + 'static,
 {
     let resource = R::from_create_input(input);
     let dl = ctx.get_data_layer::<R::DataLayer>();
-    dl.create(resource).await?;
-    Ok(())
+    dl.create(resource.clone()).await?;
+    Ok(resource)
 }
 
-pub async fn update<R, A>(primary_key: &R::PrimaryKey, input: R::Input, ctx: &Context) -> Result<()>
+pub async fn update<R, A>(primary_key: &R::PrimaryKey, input: R::Input, ctx: &Context) -> Result<R>
 where
     R: Update<A> + 'static,
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
     let mut resource = dl.read::<R>(primary_key).await?;
     resource.apply_update_input(input);
-    dl.update(resource).await?;
-    Ok(())
+    dl.update(resource.clone()).await?;
+    Ok(resource)
 }
 
 pub async fn list<R>(ctx: &Context) -> Result<Vec<R>>

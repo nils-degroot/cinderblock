@@ -2,7 +2,10 @@
 resolver = "3"
 members = [
 	"crates/ash-core",
-	"crates/ash-core-macros"
+	"crates/ash-core-macros",
+	"crates/ash-extension-api",
+	"crates/ash-json-api",
+	"crates/ash-json-api-macros",
 ]
 
 [workspace.package]

@@ -89,11 +89,11 @@ async fn main() {
     let first_ticket = &tickets[0];
     println!("Closing ticket: {}", first_ticket.ticket_id);
 
-    ash_core::update::<Ticket, Close>(&first_ticket.ticket_id, CloseInput {}, &ctx)
+    let closed = ash_core::update::<Ticket, Close>(&first_ticket.ticket_id, CloseInput {}, &ctx)
         .await
         .expect("Failed to close ticket");
 
-    println!("Ticket closed\n");
+    println!("Ticket closed: {:?}\n", closed.status);
 
     let tickets = ash_core::list::<Ticket>(&ctx)
         .await
