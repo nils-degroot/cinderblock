@@ -40,12 +40,14 @@ resource! {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ash_json_api::utoipa::ToSchema)]
 enum TicketStatus {
     #[default]
     Open,
     Closed,
 }
+
+ash_json_api::impl_field_schema!(TicketStatus);
 
 #[tokio::main]
 async fn main() -> ash_core::Result<()> {
@@ -85,6 +87,9 @@ async fn main() -> ash_core::Result<()> {
     println!("  curl http://localhost:3000/helpdesk/support/ticket");
     println!("  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'");
     println!("  curl -X PATCH http://localhost:3000/helpdesk/support/ticket/<id>/close -H 'Content-Type: application/json' -d '{{}}'");
+    println!();
+    println!("OpenAPI spec:");
+    println!("  curl http://localhost:3000/openapi.json");
 
     axum::serve(listener, router).await?;
 

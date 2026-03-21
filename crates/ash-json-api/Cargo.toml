@@ -9,7 +9,11 @@ ash-json-api-macros = { path = "../ash-json-api-macros" }
 axum = "0.8"
 inventory = "0.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"
+utoipa = { version = "5.4.0", features = ["uuid"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"], optional = true }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -17,3 +21,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+swagger-ui = ["dep:utoipa-swagger-ui"]

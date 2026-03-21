@@ -7,6 +7,8 @@
 //   1. A route registration function that wires up the resource's endpoints
 //   2. An `inventory::submit!` call that auto-registers the endpoints so
 //      `ash_json_api::router()` can discover them without manual wiring
+//   3. (Optional) `PartialSchema`/`ToSchema` impls and an OpenAPI spec
+//      function for the resource and its input structs
 //
 // # Supported endpoints
 //
@@ -27,9 +29,12 @@
 // ash_json_api { list = true; };            // only list
 // ash_json_api { create = [open]; };        // only the "open" create action
 // ash_json_api { create = [open]; list = true; };  // list + open
+// ash_json_api { openapi = false; };        // expose everything, no OpenAPI
 // ```
 
-use ash_extension_api::{ExtensionMacroInput, ResourceActionInputKind};
+use std::collections::HashSet;
+
+use ash_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
 use syn::{bracketed, parse::Parse, Ident, LitBool, Token};
 
 /// Extension-specific configuration parsed from inside the `config = { ... }`
@@ -42,13 +47,25 @@ struct JsonApiConfig {
     list: Option<bool>,
     create: Option<Vec<Ident>>,
     update: Option<Vec<Ident>>,
+    /// When set to `false`, disables OpenAPI schema and spec generation for
+    /// this resource. Defaults to enabled. This field is orthogonal to
+    /// endpoint selection — it does not participate in `is_explicit()`.
+    openapi: Option<bool>,
 }
 
 impl JsonApiConfig {
     /// Returns `true` if the user explicitly configured any endpoints,
     /// meaning we should only expose what was listed.
+    ///
+    /// Note: `openapi` is intentionally excluded — it controls schema
+    /// generation, not endpoint selection.
     fn is_explicit(&self) -> bool {
         self.list.is_some() || self.create.is_some() || self.update.is_some()
+    }
+
+    /// Returns `false` only when the user explicitly set `openapi = false;`.
+    fn should_openapi(&self) -> bool {
+        self.openapi.unwrap_or(true)
     }
 
     fn should_list(&self) -> bool {
@@ -86,6 +103,7 @@ impl Parse for JsonApiConfig {
             list: None,
             create: None,
             update: None,
+            openapi: None,
         };
 
         while !input.is_empty() {
@@ -120,6 +138,12 @@ impl Parse for JsonApiConfig {
                     config.update = Some(names);
                     let _: Token![;] = input.parse()?;
                 }
+                "openapi" => {
+                    let _: Token![=] = input.parse()?;
+                    let value: LitBool = input.parse()?;
+                    config.openapi = Some(value.value());
+                    let _: Token![;] = input.parse()?;
+                }
                 got => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -130,6 +154,33 @@ impl Parse for JsonApiConfig {
         }
 
         Ok(config)
+    }
+}
+
+/// Computes which attribute fields appear in a given action's input struct.
+///
+/// This replicates the field selection logic from `ash-core-macros`: start
+/// with all writable attributes, then narrow by `Accept::Only` if specified.
+/// The returned list contains `(field_name, field_type)` pairs.
+fn input_fields_for_accept<'a>(
+    attributes: &'a [ash_extension_api::ResourceAttributeInput],
+    accept: &Accept,
+) -> Vec<(&'a Ident, &'a syn::Type)> {
+    let writable: Vec<_> = attributes
+        .iter()
+        .filter(|attr| attr.writable.value())
+        .collect();
+
+    match accept {
+        Accept::Default => writable.iter().map(|a| (&a.name, &a.ty)).collect(),
+        Accept::Only(idents) => {
+            let names: HashSet<String> = idents.iter().map(|i| i.to_string()).collect();
+            writable
+                .iter()
+                .filter(|a| names.contains(&a.name.to_string()))
+                .map(|a| (&a.name, &a.ty))
+                .collect()
+        }
     }
 }
 
@@ -163,18 +214,14 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
     // Generate a unique function name for the registration function to avoid
     // collisions when multiple resources register endpoints.
-    let register_fn_name = Ident::new(
-        &format!(
-            "__register_json_api_{}",
-            resource
-                .name
-                .iter()
-                .map(|s| s.to_string().to_lowercase())
-                .collect::<Vec<_>>()
-                .join("_")
-        ),
-        ident.span(),
-    );
+    let name_slug = resource
+        .name
+        .iter()
+        .map(|s| s.to_string().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_");
+
+    let register_fn_name = Ident::new(&format!("__register_json_api_{name_slug}"), ident.span());
 
     // # List endpoint
     //
@@ -391,6 +438,458 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         })
     });
 
+    // # OpenAPI generation
+    //
+    // When `openapi` is not explicitly disabled, we generate:
+    //
+    //   1. `PartialSchema` impl for the resource struct — builds an object
+    //      schema from all attributes
+    //   2. `PartialSchema` impls for each enabled action's input struct —
+    //      replicates the field selection logic from `ash-core-macros`
+    //   3. An `openapi_fn` that builds an `OpenApi` spec fragment with
+    //      component schemas and path items for all enabled endpoints
+    //
+    // User-defined types (like `TicketStatus`) must implement `PartialSchema`
+    // themselves — we delegate via `<FieldType as PartialSchema>::schema()`.
+    let openapi_impls = if config.should_openapi() {
+        let ident_str = ident.to_string();
+
+        // # Resource struct schema
+        //
+        // Build an ObjectBuilder with a `.property()` + `.required()` call
+        // for each attribute. Each field's type schema is obtained via
+        // `<Type as PartialSchema>::schema()`.
+        let resource_schema_properties: Vec<_> = resource
+            .attributes
+            .iter()
+            .map(|attr| {
+                let field_name = attr.name.to_string();
+                let field_type = &attr.ty;
+                quote::quote! {
+                    .property(
+                        #field_name,
+                        <#field_type as ash_json_api::FieldSchema>::field_schema(),
+                    )
+                    .required(#field_name)
+                }
+            })
+            .collect();
+
+        let resource_schema_impl = quote::quote! {
+            impl ash_json_api::utoipa::PartialSchema for #ident {
+                fn schema() -> ash_json_api::utoipa::openapi::RefOr<
+                    ash_json_api::utoipa::openapi::schema::Schema,
+                > {
+                    ash_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                        .schema_type(
+                            ash_json_api::utoipa::openapi::schema::SchemaType::new(
+                                ash_json_api::utoipa::openapi::schema::Type::Object,
+                            ),
+                        )
+                        #(#resource_schema_properties)*
+                        .into()
+                }
+            }
+
+            impl ash_json_api::utoipa::ToSchema for #ident {
+                fn name() -> ::std::borrow::Cow<'static, str> {
+                    ::std::borrow::Cow::Borrowed(#ident_str)
+                }
+            }
+        };
+
+        // # Input struct schemas
+        //
+        // For each enabled action, generate a `PartialSchema` + `ToSchema`
+        // impl for the corresponding input struct. The field list mirrors
+        // exactly what `ash-core-macros` generates.
+        let input_schema_impls: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                let action_name_str = action.name.to_string();
+                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+                let input_type =
+                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                let input_type_str = format!("{action_type_name}Input");
+
+                let accept = match &action.kind {
+                    ResourceActionInputKind::Create { accept }
+                        if config.should_create(&action_name_str) =>
+                    {
+                        accept
+                    }
+                    ResourceActionInputKind::Update(update)
+                        if config.should_update(&action_name_str) =>
+                    {
+                        &update.accept
+                    }
+                    _ => return None,
+                };
+
+                let fields = input_fields_for_accept(&resource.attributes, accept);
+
+                let properties: Vec<_> = fields
+                    .iter()
+                    .map(|(name, ty)| {
+                        let name_str = name.to_string();
+                        quote::quote! {
+                            .property(
+                                #name_str,
+                                <#ty as ash_json_api::FieldSchema>::field_schema(),
+                            )
+                            .required(#name_str)
+                        }
+                    })
+                    .collect();
+
+                Some(quote::quote! {
+                    impl ash_json_api::utoipa::PartialSchema for #input_type {
+                        fn schema() -> ash_json_api::utoipa::openapi::RefOr<
+                            ash_json_api::utoipa::openapi::schema::Schema,
+                        > {
+                            ash_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                .schema_type(
+                                    ash_json_api::utoipa::openapi::schema::SchemaType::new(
+                                        ash_json_api::utoipa::openapi::schema::Type::Object,
+                                    ),
+                                )
+                                #(#properties)*
+                                .into()
+                        }
+                    }
+
+                    impl ash_json_api::utoipa::ToSchema for #input_type {
+                        fn name() -> ::std::borrow::Cow<'static, str> {
+                            ::std::borrow::Cow::Borrowed(#input_type_str)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // # OpenAPI spec function
+        //
+        // Builds a complete `OpenApi` fragment containing:
+        //   - Component schemas for the resource and all input structs
+        //   - Path items with operations for each enabled endpoint
+        //   - Request/response body schemas referencing the components
+        //   - Tags based on the resource struct name
+        //   - Operation IDs like `list_ticket`, `create_ticket_open`
+        let openapi_fn_name = Ident::new(&format!("__openapi_json_api_{name_slug}"), ident.span());
+
+        // Schema component registrations for the spec.
+        let resource_component = {
+            let ident_str_val = ident.to_string();
+            quote::quote! {
+                .schema(
+                    #ident_str_val,
+                    <#ident as ash_json_api::utoipa::PartialSchema>::schema(),
+                )
+            }
+        };
+
+        let input_components: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                let action_name_str = action.name.to_string();
+                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+                let input_type =
+                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                let input_type_str = format!("{action_type_name}Input");
+
+                let is_enabled = match &action.kind {
+                    ResourceActionInputKind::Create { .. } => {
+                        config.should_create(&action_name_str)
+                    }
+                    ResourceActionInputKind::Update(_) => config.should_update(&action_name_str),
+                };
+
+                if !is_enabled {
+                    return None;
+                }
+
+                Some(quote::quote! {
+                    .schema(
+                        #input_type_str,
+                        <#input_type as ash_json_api::utoipa::PartialSchema>::schema(),
+                    )
+                })
+            })
+            .collect();
+
+        // Path items for each enabled endpoint.
+        let ident_lower = ident.to_string().to_lowercase();
+
+        let list_path_item = if config.should_list() {
+            let operation_id = format!("list_{ident_lower}");
+            let base_path_val = base_path.clone();
+            Some(quote::quote! {
+                // List endpoint: GET /base_path
+                .path(
+                    #base_path_val,
+                    ash_json_api::utoipa::openapi::PathItem::new(
+                        ash_json_api::utoipa::openapi::path::HttpMethod::Get,
+                        ash_json_api::utoipa::openapi::path::OperationBuilder::new()
+                            .operation_id(Some(#operation_id))
+                            .tag(#ident_str)
+                            .summary(Some(format!("List all {}s", #ident_str)))
+                            .response(
+                                "200",
+                                ash_json_api::utoipa::openapi::ResponseBuilder::new()
+                                    .description(format!("List of {}s", #ident_str))
+                                    .content(
+                                        "application/json",
+                                        ash_json_api::utoipa::openapi::ContentBuilder::new()
+                                            .schema(Some(
+                                                // Response<Vec<Resource>>
+                                                ash_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                                    .schema_type(
+                                                        ash_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                            ash_json_api::utoipa::openapi::schema::Type::Object,
+                                                        ),
+                                                    )
+                                                    .property(
+                                                        "data",
+                                                        ash_json_api::utoipa::openapi::schema::ArrayBuilder::new()
+                                                            .items(<#ident as ash_json_api::utoipa::PartialSchema>::schema()),
+                                                    )
+                                                    .required("data"),
+                                            ))
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                            .build(),
+                    ),
+                )
+            })
+        } else {
+            None
+        };
+
+        let create_path_items: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                let accept = match &action.kind {
+                    ResourceActionInputKind::Create { accept } => accept,
+                    _ => return None,
+                };
+
+                let action_name_str = action.name.to_string();
+                if !config.should_create(&action_name_str) {
+                    return None;
+                }
+
+                let route_path = format!("{}/{}", base_path, action_name_str);
+                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+                let input_type =
+                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                let operation_id = format!("create_{}_{}", ident_lower, action_name_str);
+
+                // Determine if the request body should be required (i.e., the
+                // input struct has at least one field).
+                let fields = input_fields_for_accept(&resource.attributes, accept);
+                let body_required = !fields.is_empty();
+
+                Some(quote::quote! {
+                    .path(
+                        #route_path,
+                        ash_json_api::utoipa::openapi::PathItem::new(
+                            ash_json_api::utoipa::openapi::path::HttpMethod::Post,
+                            ash_json_api::utoipa::openapi::path::OperationBuilder::new()
+                                .operation_id(Some(#operation_id))
+                                .tag(#ident_str)
+                                .summary(Some(format!("Create {} via {}", #ident_str, #action_name_str)))
+                                .request_body(Some(
+                                    ash_json_api::utoipa::openapi::request_body::RequestBodyBuilder::new()
+                                        .content(
+                                            "application/json",
+                                            ash_json_api::utoipa::openapi::ContentBuilder::new()
+                                                .schema(Some(<#input_type as ash_json_api::utoipa::PartialSchema>::schema()))
+                                                .build(),
+                                        )
+                                        .required(Some(
+                                            if #body_required {
+                                                ash_json_api::utoipa::openapi::Required::True
+                                            } else {
+                                                ash_json_api::utoipa::openapi::Required::False
+                                            },
+                                        ))
+                                        .build(),
+                                ))
+                                .response(
+                                    "201",
+                                    ash_json_api::utoipa::openapi::ResponseBuilder::new()
+                                        .description(format!("{} created", #ident_str))
+                                        .content(
+                                            "application/json",
+                                            ash_json_api::utoipa::openapi::ContentBuilder::new()
+                                                .schema(Some(
+                                                    ash_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                                        .schema_type(
+                                                            ash_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                                ash_json_api::utoipa::openapi::schema::Type::Object,
+                                                            ),
+                                                        )
+                                                        .property(
+                                                            "data",
+                                                            <#ident as ash_json_api::utoipa::PartialSchema>::schema(),
+                                                        )
+                                                        .required("data"),
+                                                ))
+                                                .build(),
+                                        )
+                                        .build(),
+                                )
+                                .build(),
+                        ),
+                    )
+                })
+            })
+            .collect();
+
+        let update_path_items: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                let update = match &action.kind {
+                    ResourceActionInputKind::Update(update) => update,
+                    _ => return None,
+                };
+
+                let action_name_str = action.name.to_string();
+                if !config.should_update(&action_name_str) {
+                    return None;
+                }
+
+                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+                let input_type =
+                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                let operation_id = format!("update_{}_{}", ident_lower, action_name_str);
+
+                let fields = input_fields_for_accept(&resource.attributes, &update.accept);
+                let body_required = !fields.is_empty();
+
+                // Find the primary key type for the path parameter schema.
+                let pk_type = resource
+                    .attributes
+                    .iter()
+                    .find(|a| a.primary_key.value())
+                    .map(|a| &a.ty);
+
+                let pk_parameter = pk_type.map(|ty| {
+                    quote::quote! {
+                        .parameter(
+                            ash_json_api::utoipa::openapi::path::ParameterBuilder::new()
+                                .name("primary_key")
+                                .parameter_in(ash_json_api::utoipa::openapi::path::ParameterIn::Path)
+                                .required(ash_json_api::utoipa::openapi::Required::True)
+                                .schema(Some(<#ty as ash_json_api::FieldSchema>::field_schema()))
+                                .build(),
+                        )
+                    }
+                });
+
+                Some(quote::quote! {
+                    .path(
+                        #route_path,
+                        ash_json_api::utoipa::openapi::PathItem::new(
+                            ash_json_api::utoipa::openapi::path::HttpMethod::Patch,
+                            ash_json_api::utoipa::openapi::path::OperationBuilder::new()
+                                .operation_id(Some(#operation_id))
+                                .tag(#ident_str)
+                                .summary(Some(format!("Update {} via {}", #ident_str, #action_name_str)))
+                                #pk_parameter
+                                .request_body(Some(
+                                    ash_json_api::utoipa::openapi::request_body::RequestBodyBuilder::new()
+                                        .content(
+                                            "application/json",
+                                            ash_json_api::utoipa::openapi::ContentBuilder::new()
+                                                .schema(Some(<#input_type as ash_json_api::utoipa::PartialSchema>::schema()))
+                                                .build(),
+                                        )
+                                        .required(Some(
+                                            if #body_required {
+                                                ash_json_api::utoipa::openapi::Required::True
+                                            } else {
+                                                ash_json_api::utoipa::openapi::Required::False
+                                            },
+                                        ))
+                                        .build(),
+                                ))
+                                .response(
+                                    "200",
+                                    ash_json_api::utoipa::openapi::ResponseBuilder::new()
+                                        .description(format!("{} updated", #ident_str))
+                                        .content(
+                                            "application/json",
+                                            ash_json_api::utoipa::openapi::ContentBuilder::new()
+                                                .schema(Some(
+                                                    ash_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                                        .schema_type(
+                                                            ash_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                                ash_json_api::utoipa::openapi::schema::Type::Object,
+                                                            ),
+                                                        )
+                                                        .property(
+                                                            "data",
+                                                            <#ident as ash_json_api::utoipa::PartialSchema>::schema(),
+                                                        )
+                                                        .required("data"),
+                                                ))
+                                                .build(),
+                                        )
+                                        .build(),
+                                )
+                                .build(),
+                        ),
+                    )
+                })
+            })
+            .collect();
+
+        Some(quote::quote! {
+            #resource_schema_impl
+            #(#input_schema_impls)*
+
+            fn #openapi_fn_name() -> ash_json_api::utoipa::openapi::OpenApi {
+                ash_json_api::utoipa::openapi::OpenApiBuilder::new()
+                    .components(Some(
+                        ash_json_api::utoipa::openapi::ComponentsBuilder::new()
+                            #resource_component
+                            #(#input_components)*
+                            .build(),
+                    ))
+                    .paths(
+                        ash_json_api::utoipa::openapi::PathsBuilder::new()
+                            #list_path_item
+                            #(#create_path_items)*
+                            #(#update_path_items)*
+                            .build(),
+                    )
+                    .build()
+            }
+        })
+    } else {
+        None
+    };
+
+    // # Inventory submission
+    //
+    // The `openapi` field is populated when OpenAPI generation is enabled,
+    // or set to `None` when the user disabled it with `openapi = false;`.
+    let openapi_fn_name = Ident::new(&format!("__openapi_json_api_{name_slug}"), ident.span());
+
+    let openapi_field = if config.should_openapi() {
+        quote::quote! { openapi: Some(#openapi_fn_name) }
+    } else {
+        quote::quote! { openapi: None }
+    };
+
     quote::quote! {
         fn #register_fn_name(
             mut router: ash_json_api::axum::Router,
@@ -405,9 +904,12 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             router
         }
 
+        #openapi_impls
+
         ash_json_api::inventory::submit! {
             ash_json_api::ResourceEndpoint {
                 register: #register_fn_name,
+                #openapi_field,
             }
         }
     }
