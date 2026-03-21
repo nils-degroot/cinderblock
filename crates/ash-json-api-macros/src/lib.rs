@@ -126,16 +126,18 @@ impl Parse for JsonApiConfig {
         };
 
         while !input.is_empty() {
-            let key: Ident = input.parse()?;
+            // Peek at the key to determine which config field to parse,
+            // without consuming it — `parse_attribute` will consume it
+            // for the simple `key = value;` cases.
+            let key: Ident = input.fork().parse()?;
 
             match key.to_string().as_str() {
                 "list" => {
-                    let _: Token![=] = input.parse()?;
-                    let value: LitBool = input.parse()?;
+                    let (_, value) = ash_extension_api::parse_attribute::<LitBool>(input)?;
                     config.list = Some(value.value());
-                    let _: Token![;] = input.parse()?;
                 }
                 "create" => {
+                    let _: Ident = input.parse()?;
                     let _: Token![=] = input.parse()?;
                     let content;
                     bracketed!(content in input);
@@ -147,6 +149,7 @@ impl Parse for JsonApiConfig {
                     let _: Token![;] = input.parse()?;
                 }
                 "update" => {
+                    let _: Ident = input.parse()?;
                     let _: Token![=] = input.parse()?;
                     let content;
                     bracketed!(content in input);
@@ -158,6 +161,7 @@ impl Parse for JsonApiConfig {
                     let _: Token![;] = input.parse()?;
                 }
                 "destroy" => {
+                    let _: Ident = input.parse()?;
                     let _: Token![=] = input.parse()?;
                     let content;
                     bracketed!(content in input);
@@ -169,10 +173,8 @@ impl Parse for JsonApiConfig {
                     let _: Token![;] = input.parse()?;
                 }
                 "openapi" => {
-                    let _: Token![=] = input.parse()?;
-                    let value: LitBool = input.parse()?;
+                    let (_, value) = ash_extension_api::parse_attribute::<LitBool>(input)?;
                     config.openapi = Some(value.value());
-                    let _: Token![;] = input.parse()?;
                 }
                 got => {
                     return Err(syn::Error::new(

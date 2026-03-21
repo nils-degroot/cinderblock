@@ -185,6 +185,30 @@ pub struct ExtensionMacroInput<C: Parse> {
 }
 
 // ---------------------------------------------------------------------------
+// # Parsing Helpers
+// ---------------------------------------------------------------------------
+
+/// Parses an attribute of the form `<ident> = <value>;` and returns the
+/// key identifier and the parsed value.
+///
+/// This is a convenience helper for the common DSL pattern where a
+/// keyword is followed by an equals sign, a value, and a semicolon:
+///
+/// ```text
+/// list = true;
+/// openapi = false;
+/// ```
+///
+/// The value type `V` must implement `syn::Parse`.
+pub fn parse_attribute<V: Parse>(input: syn::parse::ParseStream) -> syn::Result<(Ident, V)> {
+    let key: Ident = input.parse()?;
+    let _: Token![=] = input.parse()?;
+    let value: V = input.parse()?;
+    let _: Token![;] = input.parse()?;
+    Ok((key, value))
+}
+
+// ---------------------------------------------------------------------------
 // # Parse Implementations
 // ---------------------------------------------------------------------------
 
@@ -489,10 +513,13 @@ impl<C: Parse> Parse for ExtensionMacroInput<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::{assert, check};
     use quote::quote;
 
     fn parse_resource(tokens: proc_macro2::TokenStream) -> ResourceMacroInput {
-        syn::parse2::<ResourceMacroInput>(tokens).expect("failed to parse resource DSL")
+        let result = syn::parse2::<ResourceMacroInput>(tokens);
+        assert!(let Ok(input) = result);
+        input
     }
 
     #[test]
@@ -505,22 +532,19 @@ mod tests {
             }
         });
 
-        assert_eq!(input.name.len(), 1);
-        assert_eq!(input.name[0], "Foo");
+        check!(input.name.len() == 1);
+        check!(input.name[0] == "Foo");
 
-        assert_eq!(input.attributes.len(), 1);
+        check!(input.attributes.len() == 1);
         let attr = &input.attributes[0];
-        assert_eq!(attr.name, "id");
-        assert!(
-            !attr.primary_key.value(),
-            "primary_key should default to false"
-        );
-        assert!(!attr.generated.value(), "generated should default to false");
-        assert!(attr.writable.value(), "writable should default to true");
-        assert!(attr.default.is_none(), "default should be None");
+        check!(attr.name == "id");
+        check!(!attr.primary_key.value());
+        check!(!attr.generated.value());
+        check!(attr.writable.value());
+        check!(attr.default.is_none());
 
-        assert!(input.actions.is_empty());
-        assert!(input.extensions.is_empty());
+        check!(input.actions.is_empty());
+        check!(input.extensions.is_empty());
     }
 
     #[test]
@@ -533,10 +557,10 @@ mod tests {
             }
         });
 
-        assert_eq!(input.name.len(), 3);
-        assert_eq!(input.name[0], "Helpdesk");
-        assert_eq!(input.name[1], "Support");
-        assert_eq!(input.name[2], "Ticket");
+        check!(input.name.len() == 3);
+        check!(input.name[0] == "Helpdesk");
+        check!(input.name[1] == "Support");
+        check!(input.name[2] == "Ticket");
     }
 
     #[test]
@@ -553,12 +577,12 @@ mod tests {
             }
         });
 
-        assert_eq!(input.attributes.len(), 1);
+        check!(input.attributes.len() == 1);
         let attr = &input.attributes[0];
-        assert_eq!(attr.name, "ticket_id");
-        assert!(attr.primary_key.value());
-        assert!(!attr.writable.value());
-        assert!(attr.default.is_some());
+        check!(attr.name == "ticket_id");
+        check!(attr.primary_key.value());
+        check!(!attr.writable.value());
+        check!(attr.default.is_some());
     }
 
     #[test]
@@ -575,9 +599,9 @@ mod tests {
         });
 
         let attr = &input.attributes[0];
-        assert!(attr.generated.value());
-        assert!(attr.primary_key.value());
-        assert!(attr.writable.value());
+        check!(attr.generated.value());
+        check!(attr.primary_key.value());
+        check!(attr.writable.value());
     }
 
     #[test]
@@ -595,19 +619,19 @@ mod tests {
             }
         });
 
-        assert_eq!(input.attributes.len(), 3);
+        check!(input.attributes.len() == 3);
 
-        assert_eq!(input.attributes[0].name, "order_id");
-        assert!(input.attributes[0].primary_key.value());
-        assert!(!input.attributes[0].writable.value());
+        check!(input.attributes[0].name == "order_id");
+        check!(input.attributes[0].primary_key.value());
+        check!(!input.attributes[0].writable.value());
 
-        assert_eq!(input.attributes[1].name, "item_name");
-        assert!(!input.attributes[1].primary_key.value());
-        assert!(input.attributes[1].writable.value());
+        check!(input.attributes[1].name == "item_name");
+        check!(!input.attributes[1].primary_key.value());
+        check!(input.attributes[1].writable.value());
 
-        assert_eq!(input.attributes[2].name, "quantity");
-        assert!(!input.attributes[2].primary_key.value());
-        assert!(input.attributes[2].writable.value());
+        check!(input.attributes[2].name == "quantity");
+        check!(!input.attributes[2].primary_key.value());
+        check!(input.attributes[2].writable.value());
     }
 
     #[test]
@@ -624,14 +648,9 @@ mod tests {
             }
         });
 
-        assert_eq!(input.actions.len(), 1);
-        assert_eq!(input.actions[0].name, "open");
-        assert!(matches!(
-            &input.actions[0].kind,
-            ResourceActionInputKind::Create {
-                accept: Accept::Default
-            }
-        ));
+        check!(input.actions.len() == 1);
+        check!(input.actions[0].name == "open");
+        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
     }
 
     #[test]
@@ -650,20 +669,11 @@ mod tests {
             }
         });
 
-        assert_eq!(input.actions.len(), 1);
-        assert_eq!(input.actions[0].name, "assign");
-        match &input.actions[0].kind {
-            ResourceActionInputKind::Create { accept } => match accept {
-                Accept::Only(idents) => {
-                    assert_eq!(idents.len(), 1);
-                    assert_eq!(idents[0], "subject");
-                }
-                Accept::Default => panic!("expected Only accept, got Default"),
-            },
-            _ => {
-                panic!("expected Create, got something else")
-            }
-        }
+        check!(input.actions.len() == 1);
+        check!(input.actions[0].name == "assign");
+        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[0].kind);
+        check!(idents.len() == 1);
+        check!(idents[0] == "subject");
     }
 
     #[test]
@@ -676,7 +686,7 @@ mod tests {
             }
         });
 
-        assert!(input.actions.is_empty());
+        check!(input.actions.is_empty());
     }
 
     #[test]
@@ -705,106 +715,73 @@ mod tests {
             }
         });
 
-        assert_eq!(input.name.len(), 3);
-        assert_eq!(input.name[0], "Helpdesk");
-        assert_eq!(input.name[1], "Support");
-        assert_eq!(input.name[2], "Ticket");
+        check!(input.name.len() == 3);
+        check!(input.name[0] == "Helpdesk");
+        check!(input.name[1] == "Support");
+        check!(input.name[2] == "Ticket");
 
-        assert_eq!(input.attributes.len(), 3);
+        check!(input.attributes.len() == 3);
 
         let ticket_id = &input.attributes[0];
-        assert_eq!(ticket_id.name, "ticket_id");
-        assert!(ticket_id.primary_key.value());
-        assert!(!ticket_id.writable.value());
-        assert!(ticket_id.default.is_some());
+        check!(ticket_id.name == "ticket_id");
+        check!(ticket_id.primary_key.value());
+        check!(!ticket_id.writable.value());
+        check!(ticket_id.default.is_some());
 
         let subject = &input.attributes[1];
-        assert_eq!(subject.name, "subject");
-        assert!(!subject.primary_key.value());
-        assert!(subject.writable.value());
-        assert!(subject.default.is_none());
+        check!(subject.name == "subject");
+        check!(!subject.primary_key.value());
+        check!(subject.writable.value());
+        check!(subject.default.is_none());
 
         let status = &input.attributes[2];
-        assert_eq!(status.name, "status");
-        assert!(!status.primary_key.value());
-        assert!(status.writable.value());
+        check!(status.name == "status");
+        check!(!status.primary_key.value());
+        check!(status.writable.value());
 
-        assert_eq!(input.actions.len(), 2);
+        check!(input.actions.len() == 2);
 
-        assert_eq!(input.actions[0].name, "open");
-        assert!(matches!(
-            &input.actions[0].kind,
-            ResourceActionInputKind::Create {
-                accept: Accept::Default
-            }
-        ));
+        check!(input.actions[0].name == "open");
+        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
 
-        assert_eq!(input.actions[1].name, "assign");
-        match &input.actions[1].kind {
-            ResourceActionInputKind::Create { accept } => match accept {
-                Accept::Only(idents) => {
-                    assert_eq!(idents.len(), 1);
-                    assert_eq!(idents[0], "subject");
-                }
-                Accept::Default => panic!("expected Only accept for assign action"),
-            },
-            _ => {
-                panic!("expected Create, got something else")
-            }
-        }
+        check!(input.actions[1].name == "assign");
+        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[1].kind);
+        check!(idents.len() == 1);
+        check!(idents[0] == "subject");
     }
 
     #[test]
     fn parse_simple_create_action() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             create open;
-        })
-        .expect("failed to parse action");
+        }));
 
-        assert_eq!(action.name, "open");
-        assert!(matches!(
-            action.kind,
-            ResourceActionInputKind::Create {
-                accept: Accept::Default
-            }
-        ));
+        check!(action.name == "open");
+        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = action.kind);
     }
 
     #[test]
     fn parse_create_action_with_multiple_accept_idents() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             create bulk_insert {
                 accept [name, email, age];
             }
-        })
-        .expect("failed to parse action");
+        }));
 
-        assert_eq!(action.name, "bulk_insert");
-        match action.kind {
-            ResourceActionInputKind::Create { accept } => match accept {
-                Accept::Only(idents) => {
-                    let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
-                    assert_eq!(names, vec!["name", "email", "age"]);
-                }
-                Accept::Default => panic!("expected Only accept, got Default"),
-            },
-            ResourceActionInputKind::Update(_) => panic!("expected Create, got Update"),
-            ResourceActionInputKind::Destroy => panic!("expected Create, got Destroy"),
-        }
+        check!(action.name == "bulk_insert");
+        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = action.kind);
+        let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+        check!(names == vec!["name", "email", "age"]);
     }
 
     #[test]
     fn parse_simple_destroy_action() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             destroy foo;
-        })
-        .expect("failed to parse destroy action");
+        }));
 
-        assert_eq!(action.name, "foo");
-        assert!(
-            matches!(action.kind, ResourceActionInputKind::Destroy),
-            "expected Destroy action kind"
-        );
+        check!(action.name == "foo");
+        check!(let ResourceActionInputKind::Destroy = action.kind);
     }
 
     #[test]
@@ -813,16 +790,10 @@ mod tests {
             frobnicate foo;
         });
 
-        let err = result.expect_err("expected parse error for unknown action kind");
+        assert!(let Err(err) = result);
         let msg = err.to_string();
-        assert!(
-            msg.contains("Unexpected action kind"),
-            "error should mention 'Unexpected action kind', got: {msg}"
-        );
-        assert!(
-            msg.contains("frobnicate"),
-            "error should mention the invalid kind 'frobnicate', got: {msg}"
-        );
+        check!(msg.contains("Unexpected action kind"));
+        check!(msg.contains("frobnicate"));
     }
 
     #[test]
@@ -837,16 +808,10 @@ mod tests {
             }
         });
 
-        let err = result.expect_err("expected parse error for unknown attribute key");
+        assert!(let Err(err) = result);
         let msg = err.to_string();
-        assert!(
-            msg.contains("Unexpected attribute key"),
-            "error should mention 'Unexpected attribute key', got: {msg}"
-        );
-        assert!(
-            msg.contains("bogus"),
-            "error should mention the invalid key 'bogus', got: {msg}"
-        );
+        check!(msg.contains("Unexpected attribute key"));
+        check!(msg.contains("bogus"));
     }
 
     #[test]
@@ -859,86 +824,54 @@ mod tests {
             }
         });
 
-        assert!(
-            result.is_err(),
-            "expected parse error when semicolon is missing after name"
-        );
+        check!(let Err(_) = result);
     }
 
     #[test]
     fn parse_simple_update_action_with_default_accept() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             update close;
-        })
-        .expect("failed to parse update action");
+        }));
 
-        assert_eq!(action.name, "close");
-        match &action.kind {
-            ResourceActionInputKind::Update(update) => {
-                assert!(
-                    matches!(update.accept, Accept::Default),
-                    "expected default accept"
-                );
-                assert!(update.changes.is_empty());
-            }
-            _ => panic!("expected Update action kind"),
-        }
+        check!(action.name == "close");
+        assert!(let ResourceActionInputKind::Update(update) = &action.kind);
+        check!(let Accept::Default = update.accept);
+        check!(update.changes.is_empty());
     }
 
     #[test]
     fn parse_update_action_with_accept_and_change_ref() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             update close {
                 accept [];
                 change_ref |resource| {
                     resource.status = TicketStatus::Closed;
                 };
             }
-        })
-        .expect("failed to parse update action with change_ref");
+        }));
 
-        assert_eq!(action.name, "close");
-        match &action.kind {
-            ResourceActionInputKind::Update(update) => {
-                match &update.accept {
-                    Accept::Only(idents) => {
-                        assert!(idents.is_empty(), "expected empty accept list")
-                    }
-                    Accept::Default => panic!("expected Only accept, got Default"),
-                }
-                assert_eq!(update.changes.len(), 1);
-                assert!(
-                    matches!(update.changes[0], UpdateChange::ChangeRef(_)),
-                    "expected ChangeRef variant"
-                );
-            }
-            _ => panic!("expected Update action kind"),
-        }
+        check!(action.name == "close");
+        assert!(let ResourceActionInputKind::Update(update) = &action.kind);
+        assert!(let Accept::Only(idents) = &update.accept);
+        check!(idents.is_empty());
+        check!(update.changes.len() == 1);
+        check!(let UpdateChange::ChangeRef(_) = &update.changes[0]);
     }
 
     #[test]
     fn parse_update_action_with_accept_fields() {
-        let action = syn::parse2::<ResourceActionInput>(quote! {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
             update reassign {
                 accept [subject, status];
             }
-        })
-        .expect("failed to parse update action with accept fields");
+        }));
 
-        assert_eq!(action.name, "reassign");
-        match &action.kind {
-            ResourceActionInputKind::Update(update) => {
-                match &update.accept {
-                    Accept::Only(idents) => {
-                        let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
-                        assert_eq!(names, vec!["subject", "status"]);
-                    }
-                    Accept::Default => panic!("expected Only accept, got Default"),
-                }
-                assert!(update.changes.is_empty());
-            }
-            _ => panic!("expected Update action kind"),
-        }
+        check!(action.name == "reassign");
+        assert!(let ResourceActionInputKind::Update(update) = &action.kind);
+        assert!(let Accept::Only(idents) = &update.accept);
+        let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
+        check!(names == vec!["subject", "status"]);
+        check!(update.changes.is_empty());
     }
 
     #[test]
@@ -956,12 +889,38 @@ mod tests {
             }
         });
 
-        assert_eq!(input.actions.len(), 2);
-        assert_eq!(input.actions[1].name, "remove");
-        assert!(
-            matches!(input.actions[1].kind, ResourceActionInputKind::Destroy),
-            "expected Destroy action kind"
-        );
+        check!(input.actions.len() == 2);
+        check!(input.actions[1].name == "remove");
+        check!(let ResourceActionInputKind::Destroy = input.actions[1].kind);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_attribute tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_attribute_bool() {
+        let tokens = quote! { enabled = true; };
+        assert!(let Ok((key, value)) = syn::parse::Parser::parse2(parse_attribute::<LitBool>, tokens));
+
+        check!(key == "enabled");
+        check!(value.value());
+    }
+
+    #[test]
+    fn parse_attribute_missing_semicolon() {
+        let tokens = quote! { enabled = true };
+        let result = syn::parse::Parser::parse2(parse_attribute::<LitBool>, tokens);
+
+        check!(let Err(_) = result);
+    }
+
+    #[test]
+    fn parse_attribute_missing_equals() {
+        let tokens = quote! { enabled true; };
+        let result = syn::parse::Parser::parse2(parse_attribute::<LitBool>, tokens);
+
+        check!(let Err(_) = result);
     }
 
     // -----------------------------------------------------------------------
@@ -984,17 +943,10 @@ mod tests {
             }
         });
 
-        assert_eq!(input.extensions.len(), 1);
-        assert_eq!(
-            input.extensions[0]
-                .path
-                .segments
-                .last()
-                .expect("non-empty path")
-                .ident,
-            "ash_json_api"
-        );
-        assert!(!input.extensions[0].config_tokens.is_empty());
+        check!(input.extensions.len() == 1);
+        assert!(let Some(last_segment) = input.extensions[0].path.segments.last());
+        check!(last_segment.ident == "ash_json_api");
+        check!(!input.extensions[0].config_tokens.is_empty());
     }
 
     #[test]
@@ -1017,8 +969,8 @@ mod tests {
             }
         });
 
-        assert_eq!(input.actions.len(), 1);
-        assert_eq!(input.extensions.len(), 1);
+        check!(input.actions.len() == 1);
+        check!(input.extensions.len() == 1);
     }
 
     #[test]
@@ -1037,8 +989,8 @@ mod tests {
             }
         });
 
-        assert!(input.actions.is_empty());
-        assert_eq!(input.extensions.len(), 1);
+        check!(input.actions.is_empty());
+        check!(input.extensions.len() == 1);
     }
 
     #[test]
@@ -1060,7 +1012,7 @@ mod tests {
             }
         });
 
-        assert_eq!(input.extensions.len(), 2);
+        check!(input.extensions.len() == 2);
     }
 
     /// Verifies that `ExtensionMacroInput<C>` correctly parses forwarded
@@ -1074,18 +1026,15 @@ mod tests {
 
         impl Parse for TestConfig {
             fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-                let key: Ident = input.parse()?;
-                assert_eq!(key, "list");
-                let _: Token![=] = input.parse()?;
-                let value: LitBool = input.parse()?;
-                let _: Token![;] = input.parse()?;
+                let (key, value) = parse_attribute::<LitBool>(input)?;
+                check!(key == "list");
                 Ok(TestConfig {
                     list: value.value(),
                 })
             }
         }
 
-        let input = syn::parse2::<ExtensionMacroInput<TestConfig>>(quote! {
+        assert!(let Ok(input) = syn::parse2::<ExtensionMacroInput<TestConfig>>(quote! {
             {
                 name = Helpdesk.Support.Ticket;
 
@@ -1103,10 +1052,9 @@ mod tests {
             config = {
                 list = true;
             }
-        })
-        .expect("failed to parse ExtensionMacroInput");
+        }));
 
-        assert_eq!(input.resource.name.len(), 3);
-        assert!(input.config.list);
+        check!(input.resource.name.len() == 3);
+        check!(input.config.list);
     }
 }
