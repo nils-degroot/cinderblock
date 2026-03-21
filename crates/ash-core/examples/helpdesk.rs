@@ -22,7 +22,9 @@ resource! {
     actions {
         create open;
 
-        create assign accept [ subject ];
+        create assign {
+            accept [subject];
+        };
 
         update close {
             accept [];

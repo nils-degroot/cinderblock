@@ -319,23 +319,44 @@ impl Parse for ResourceActionInput {
                         accept: Accept::Default,
                     }
                 } else {
-                    // TODO: Verify this
-                    let _: Ident = input.parse()?; // `accept`
-
                     let content;
-                    bracketed!(content in input);
+                    braced!(content in input);
 
-                    let mut idents: Vec<Ident> = vec![];
+                    let mut accept = Accept::Default;
 
                     while !content.is_empty() {
-                        idents.push(content.parse()?);
+                        let key: Ident = content.parse()?;
+
+                        match key.to_string().as_str() {
+                            "accept" => {
+                                let accept_content;
+                                bracketed!(accept_content in content);
+
+                                accept = Accept::Only(
+                                    accept_content
+                                        .parse_terminated(Ident::parse, Token![,])?
+                                        .into_iter()
+                                        .collect(),
+                                );
+
+                                let _: Token![;] = content.parse()?;
+                            }
+                            got => {
+                                return Err(syn::Error::new(
+                                    key.span(),
+                                    format!("Unexpected create keyword, got `{got}`"),
+                                ));
+                            }
+                        }
                     }
 
-                    let _: Token![;] = input.parse()?;
-
-                    ResourceActionInputKind::Create {
-                        accept: Accept::Only(idents),
+                    // Consume optional trailing semicolon after the closing brace,
+                    // allowing both `create open { ... }` and `create open { ... };`.
+                    if input.peek(Token![;]) {
+                        let _: Token![;] = input.parse()?;
                     }
+
+                    ResourceActionInputKind::Create { accept }
                 }
             }
             "update" => {
@@ -677,7 +698,9 @@ mod tests {
             }
 
             actions {
-                create assign accept [ subject ];
+                create assign {
+                    accept [subject];
+                };
             }
         });
 
@@ -730,7 +753,9 @@ mod tests {
             actions {
                 create open;
 
-                create assign accept [ subject ];
+                create assign {
+                    accept [subject];
+                };
             }
         });
 
@@ -802,7 +827,9 @@ mod tests {
     #[test]
     fn parse_create_action_with_multiple_accept_idents() {
         let action = syn::parse2::<ResourceActionInput>(quote! {
-            create bulk_insert accept [ name email age ];
+            create bulk_insert {
+                accept [name, email, age];
+            }
         })
         .expect("failed to parse action");
 
