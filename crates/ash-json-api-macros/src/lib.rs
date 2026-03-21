@@ -17,18 +17,22 @@
 //   named action
 // - **update**: `PATCH /resource_path/{primary_key}/:action` — updates a
 //   resource via the named action
+// - **destroy**: `DELETE /resource_path/{primary_key}/:action` — destroys a
+//   resource via the named action
 //
 // # Config semantics
 //
 // An empty config block (`ash_json_api {}`) exposes everything: the list
-// endpoint plus all declared create and update actions. If any of `list`,
-// `create`, or `update` is explicitly specified, only those are exposed.
+// endpoint plus all declared create, update, and destroy actions. If any of
+// `list`, `create`, `update`, or `destroy` is explicitly specified, only
+// those are exposed.
 //
 // ```text
 // ash_json_api {};                          // expose everything
 // ash_json_api { list = true; };            // only list
 // ash_json_api { create = [open]; };        // only the "open" create action
 // ash_json_api { create = [open]; list = true; };  // list + open
+// ash_json_api { destroy = [remove]; };     // only the "remove" destroy action
 // ash_json_api { openapi = false; };        // expose everything, no OpenAPI
 // ```
 
@@ -47,6 +51,7 @@ struct JsonApiConfig {
     list: Option<bool>,
     create: Option<Vec<Ident>>,
     update: Option<Vec<Ident>>,
+    destroy: Option<Vec<Ident>>,
     /// When set to `false`, disables OpenAPI schema and spec generation for
     /// this resource. Defaults to enabled. This field is orthogonal to
     /// endpoint selection — it does not participate in `is_explicit()`.
@@ -60,7 +65,10 @@ impl JsonApiConfig {
     /// Note: `openapi` is intentionally excluded — it controls schema
     /// generation, not endpoint selection.
     fn is_explicit(&self) -> bool {
-        self.list.is_some() || self.create.is_some() || self.update.is_some()
+        self.list.is_some()
+            || self.create.is_some()
+            || self.update.is_some()
+            || self.destroy.is_some()
     }
 
     /// Returns `false` only when the user explicitly set `openapi = false;`.
@@ -95,6 +103,16 @@ impl JsonApiConfig {
             true
         }
     }
+
+    fn should_destroy(&self, action_name: &str) -> bool {
+        if self.is_explicit() {
+            self.destroy
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|n| n == action_name))
+        } else {
+            true
+        }
+    }
 }
 
 impl Parse for JsonApiConfig {
@@ -103,6 +121,7 @@ impl Parse for JsonApiConfig {
             list: None,
             create: None,
             update: None,
+            destroy: None,
             openapi: None,
         };
 
@@ -136,6 +155,17 @@ impl Parse for JsonApiConfig {
                         .into_iter()
                         .collect();
                     config.update = Some(names);
+                    let _: Token![;] = input.parse()?;
+                }
+                "destroy" => {
+                    let _: Token![=] = input.parse()?;
+                    let content;
+                    bracketed!(content in input);
+                    let names = content
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                    config.destroy = Some(names);
                     let _: Token![;] = input.parse()?;
                 }
                 "openapi" => {
@@ -438,6 +468,85 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         })
     });
 
+    // # Destroy endpoints
+    //
+    // DELETE /helpdesk/support/ticket/{primary_key}/remove → destroys via "remove"
+    //
+    // The primary key is extracted from the URL path. The response is
+    // `204 No Content` with an empty body — the deleted resource is not
+    // returned over the wire (even though `destroy()` returns it internally).
+    let destroy_routes = resource.actions.iter().filter_map(|action| {
+        match &action.kind {
+            ResourceActionInputKind::Destroy => {}
+            _ => return None,
+        }
+
+        let action_name_str = action.name.to_string();
+        if !config.should_destroy(&action_name_str) {
+            return None;
+        }
+
+        let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+
+        let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+        let action_type = Ident::new(&action_type_name, action.name.span());
+
+        Some(quote::quote! {
+            {
+                let ctx = ctx.clone();
+                ash_json_api::tracing::info!(
+                    resource = stringify!(#ident),
+                    action = #action_name_str,
+                    route = #route_path,
+                    "registering JSON API destroy endpoint"
+                );
+                router = router.route(
+                    #route_path,
+                    ash_json_api::axum::routing::delete(
+                        move |
+                            ash_json_api::axum::extract::Path(primary_key): ash_json_api::axum::extract::Path<
+                                <#ident as ash_core::Resource>::PrimaryKey,
+                            >,
+                        | {
+                            let ctx = ctx.clone();
+                            async move {
+                                ash_json_api::tracing::info!(
+                                    resource = stringify!(#ident),
+                                    action = #action_name_str,
+                                    %primary_key,
+                                    "handling destroy request"
+                                );
+
+                                match ash_core::destroy::<#ident, #action_type>(
+                                    &primary_key,
+                                    &ctx,
+                                )
+                                .await
+                                {
+                                    Ok(_) => ash_json_api::axum::http::StatusCode::NO_CONTENT
+                                        .into_response(),
+                                    Err(err) => {
+                                        ash_json_api::tracing::error!(
+                                            resource = stringify!(#ident),
+                                            action = #action_name_str,
+                                            error = %err,
+                                            "destroy request failed"
+                                        );
+                                        (
+                                            ash_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            err.to_string(),
+                                        )
+                                            .into_response()
+                                    }
+                                }
+                            }
+                        },
+                    ),
+                );
+            }
+        })
+    });
+
     // # OpenAPI generation
     //
     // When `openapi` is not explicitly disabled, we generate:
@@ -604,6 +713,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         config.should_create(&action_name_str)
                     }
                     ResourceActionInputKind::Update(_) => config.should_update(&action_name_str),
+                    // Destroy has no input struct, so no schema component needed.
+                    ResourceActionInputKind::Destroy => return None,
                 };
 
                 if !is_enabled {
@@ -852,6 +963,72 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             })
             .collect();
 
+        // # Destroy path items
+        //
+        // DELETE /resource/{primary_key}/action → 204 No Content
+        //
+        // Destroy endpoints have a path parameter for the primary key but
+        // no request body and no response body.
+        let destroy_path_items: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                match &action.kind {
+                    ResourceActionInputKind::Destroy => {}
+                    _ => return None,
+                }
+
+                let action_name_str = action.name.to_string();
+                if !config.should_destroy(&action_name_str) {
+                    return None;
+                }
+
+                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+                let operation_id = format!("destroy_{}_{}", ident_lower, action_name_str);
+
+                // Find the primary key type for the path parameter schema.
+                let pk_type = resource
+                    .attributes
+                    .iter()
+                    .find(|a| a.primary_key.value())
+                    .map(|a| &a.ty);
+
+                let pk_parameter = pk_type.map(|ty| {
+                    quote::quote! {
+                        .parameter(
+                            ash_json_api::utoipa::openapi::path::ParameterBuilder::new()
+                                .name("primary_key")
+                                .parameter_in(ash_json_api::utoipa::openapi::path::ParameterIn::Path)
+                                .required(ash_json_api::utoipa::openapi::Required::True)
+                                .schema(Some(<#ty as ash_json_api::FieldSchema>::field_schema()))
+                                .build(),
+                        )
+                    }
+                });
+
+                Some(quote::quote! {
+                    .path(
+                        #route_path,
+                        ash_json_api::utoipa::openapi::PathItem::new(
+                            ash_json_api::utoipa::openapi::path::HttpMethod::Delete,
+                            ash_json_api::utoipa::openapi::path::OperationBuilder::new()
+                                .operation_id(Some(#operation_id))
+                                .tag(#ident_str)
+                                .summary(Some(format!("Destroy {} via {}", #ident_str, #action_name_str)))
+                                #pk_parameter
+                                .response(
+                                    "204",
+                                    ash_json_api::utoipa::openapi::ResponseBuilder::new()
+                                        .description(format!("{} destroyed", #ident_str))
+                                        .build(),
+                                )
+                                .build(),
+                        ),
+                    )
+                })
+            })
+            .collect();
+
         Some(quote::quote! {
             #resource_schema_impl
             #(#input_schema_impls)*
@@ -869,6 +1046,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             #list_path_item
                             #(#create_path_items)*
                             #(#update_path_items)*
+                            #(#destroy_path_items)*
                             .build(),
                     )
                     .build()
@@ -900,6 +1078,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             #list_route
             #(#create_routes)*
             #(#update_routes)*
+            #(#destroy_routes)*
 
             router
         }

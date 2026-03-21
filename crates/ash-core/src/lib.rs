@@ -66,6 +66,11 @@ pub trait Update<A>: Resource {
     fn apply_update_input(&mut self, input: Self::Input);
 }
 
+/// Marker trait for destroy actions. Unlike create and update, destroy
+/// actions take no input — the primary key is sufficient to identify the
+/// resource to delete.
+pub trait Destroy<A>: Resource {}
+
 pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<R>
 where
     R: Create<A> + 'static,
@@ -93,4 +98,12 @@ where
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
     dl.list().await
+}
+
+pub async fn destroy<R, A>(primary_key: &R::PrimaryKey, ctx: &Context) -> Result<R>
+where
+    R: Destroy<A> + 'static,
+{
+    let dl = ctx.get_data_layer::<R::DataLayer>();
+    dl.destroy(primary_key).await
 }

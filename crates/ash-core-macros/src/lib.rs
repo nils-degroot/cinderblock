@@ -223,6 +223,22 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 }
             }
         }
+        ResourceActionInputKind::Destroy => {
+            // # Destroy action codegen
+            //
+            // Destroy actions only need a marker struct and a `Destroy<A>` impl.
+            // No input struct is generated — the primary key comes from the
+            // URL path at the HTTP layer.
+            let action_name = convert_case::ccase!(pascal, action.name.to_string());
+            let action_name = Ident::new(&action_name, action.name.span());
+
+            quote::quote! {
+                #[derive(::std::fmt::Debug)]
+                struct #action_name;
+
+                impl ash_core::Destroy<#action_name> for #ident {}
+            }
+        }
     });
 
     let name_segments = input.name.iter().map(|segment| segment.to_string());
@@ -452,8 +468,8 @@ mod tests {
                 }
                 Accept::Default => panic!("expected Only accept, got Default"),
             },
-            ResourceActionInputKind::Update(_) => {
-                todo!()
+            _ => {
+                panic!("expected Create, got something else")
             }
         }
     }
@@ -540,8 +556,8 @@ mod tests {
                 }
                 Accept::Default => panic!("expected Only accept for assign action"),
             },
-            ResourceActionInputKind::Update(_) => {
-                todo!()
+            _ => {
+                panic!("expected Create, got something else")
             }
         }
     }
@@ -581,13 +597,14 @@ mod tests {
                 Accept::Default => panic!("expected Only accept, got Default"),
             },
             ResourceActionInputKind::Update(_) => todo!(),
+            ResourceActionInputKind::Destroy => todo!(),
         }
     }
 
     #[test]
     fn unknown_action_kind_produces_error() {
         let result = syn::parse2::<ResourceActionInput>(quote! {
-            destroy foo;
+            frobnicate foo;
         });
 
         let err = result.expect_err("expected parse error for unknown action kind");
@@ -597,8 +614,8 @@ mod tests {
             "error should mention 'Unexpected action kind', got: {msg}"
         );
         assert!(
-            msg.contains("destroy"),
-            "error should mention the invalid kind 'destroy', got: {msg}"
+            msg.contains("frobnicate"),
+            "error should mention the invalid kind 'frobnicate', got: {msg}"
         );
     }
 

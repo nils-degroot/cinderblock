@@ -92,11 +92,15 @@ pub struct ResourceActionInput {
     pub name: Ident,
 }
 
-/// The kind-specific payload of an action — either create or update.
+/// The kind-specific payload of an action — create, update, or destroy.
 #[derive(Debug)]
 pub enum ResourceActionInputKind {
-    Create { accept: Accept },
+    Create {
+        accept: Accept,
+    },
     Update(ActionUpdate),
+    /// Destroy takes no input — the primary key is provided via the URL path.
+    Destroy,
 }
 
 /// Body of an `update` action: which fields to accept and what change
@@ -237,6 +241,14 @@ impl Parse for ResourceActionInput {
 
                     ResourceActionInputKind::Create { accept }
                 }
+            }
+            "destroy" => {
+                // Destroy actions are simple — just `destroy action_name;`
+                // with no body. The primary key comes from the URL path at
+                // the HTTP layer.
+                let _: Token![;] = input.parse()?;
+
+                ResourceActionInputKind::Destroy
             }
             "update" => {
                 if input.peek(Token![;]) {
@@ -648,8 +660,8 @@ mod tests {
                 }
                 Accept::Default => panic!("expected Only accept, got Default"),
             },
-            ResourceActionInputKind::Update(_) => {
-                panic!("expected Create, got Update")
+            _ => {
+                panic!("expected Create, got something else")
             }
         }
     }
@@ -736,8 +748,8 @@ mod tests {
                 }
                 Accept::Default => panic!("expected Only accept for assign action"),
             },
-            ResourceActionInputKind::Update(_) => {
-                panic!("expected Create, got Update")
+            _ => {
+                panic!("expected Create, got something else")
             }
         }
     }
@@ -777,13 +789,28 @@ mod tests {
                 Accept::Default => panic!("expected Only accept, got Default"),
             },
             ResourceActionInputKind::Update(_) => panic!("expected Create, got Update"),
+            ResourceActionInputKind::Destroy => panic!("expected Create, got Destroy"),
         }
+    }
+
+    #[test]
+    fn parse_simple_destroy_action() {
+        let action = syn::parse2::<ResourceActionInput>(quote! {
+            destroy foo;
+        })
+        .expect("failed to parse destroy action");
+
+        assert_eq!(action.name, "foo");
+        assert!(
+            matches!(action.kind, ResourceActionInputKind::Destroy),
+            "expected Destroy action kind"
+        );
     }
 
     #[test]
     fn unknown_action_kind_produces_error() {
         let result = syn::parse2::<ResourceActionInput>(quote! {
-            destroy foo;
+            frobnicate foo;
         });
 
         let err = result.expect_err("expected parse error for unknown action kind");
@@ -793,8 +820,8 @@ mod tests {
             "error should mention 'Unexpected action kind', got: {msg}"
         );
         assert!(
-            msg.contains("destroy"),
-            "error should mention the invalid kind 'destroy', got: {msg}"
+            msg.contains("frobnicate"),
+            "error should mention the invalid kind 'frobnicate', got: {msg}"
         );
     }
 
@@ -912,6 +939,29 @@ mod tests {
             }
             _ => panic!("expected Update action kind"),
         }
+    }
+
+    #[test]
+    fn resource_with_destroy_action() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+            }
+
+            actions {
+                create open;
+                destroy remove;
+            }
+        });
+
+        assert_eq!(input.actions.len(), 2);
+        assert_eq!(input.actions[1].name, "remove");
+        assert!(
+            matches!(input.actions[1].kind, ResourceActionInputKind::Destroy),
+            "expected Destroy action kind"
+        );
     }
 
     // -----------------------------------------------------------------------

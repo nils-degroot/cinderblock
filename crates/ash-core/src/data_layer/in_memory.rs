@@ -85,4 +85,27 @@ impl DataLayer for InMemoryDataLayer {
             })
             .unwrap_or_default())
     }
+
+    async fn destroy<R: crate::Resource + 'static>(
+        &self,
+        primary_key: &R::PrimaryKey,
+    ) -> crate::Result<R> {
+        let state = STATE.clone();
+        let mut state = state.write().await;
+
+        let key = primary_key.to_string();
+
+        let map = state
+            .get_mut(&TypeId::of::<R>())
+            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+
+        let boxed = map
+            .remove(&key)
+            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+
+        boxed
+            .downcast::<R>()
+            .map(|r| *r)
+            .map_err(|_| "failed to downcast destroyed resource".into())
+    }
 }

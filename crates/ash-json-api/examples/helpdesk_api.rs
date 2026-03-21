@@ -33,6 +33,8 @@ resource! {
                 ticket.status = TicketStatus::Closed;
             };
         };
+
+        destroy remove;
     }
 
     extensions {
@@ -87,6 +89,7 @@ async fn main() -> ash_core::Result<()> {
     println!("  curl http://localhost:3000/helpdesk/support/ticket");
     println!("  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'");
     println!("  curl -X PATCH http://localhost:3000/helpdesk/support/ticket/<id>/close -H 'Content-Type: application/json' -d '{{}}'");
+    println!("  curl -X DELETE http://localhost:3000/helpdesk/support/ticket/<id>/remove");
     println!();
     println!("OpenAPI spec:");
     println!("  curl http://localhost:3000/openapi.json");
