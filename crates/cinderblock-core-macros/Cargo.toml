@@ -1,0 +1,18 @@
+[package]
+name = "cinderblock-core-macros"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+cinderblock-extension-api = { version = "0.1.0", path = "../cinderblock-extension-api" }
+convert_case = "0.11.0"
+darling = "0.23.0"
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+syn = "2.0.117"
+
+[dev-dependencies]
+assert2 = "0.4"

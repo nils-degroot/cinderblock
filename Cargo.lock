@@ -39,96 +39,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ash-core"
-version = "0.1.0"
-dependencies = [
- "ash-core-macros",
- "dirs2",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "ash-core-macros"
-version = "0.1.0"
-dependencies = [
- "ash-extension-api",
- "assert2",
- "convert_case",
- "darling",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "ash-extension-api"
-version = "0.1.0"
-dependencies = [
- "assert2",
- "convert_case",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "ash-json-api"
-version = "0.1.0"
-dependencies = [
- "ash-core",
- "ash-json-api-macros",
- "axum",
- "inventory",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
-name = "ash-json-api-macros"
-version = "0.1.0"
-dependencies = [
- "ash-extension-api",
- "convert_case",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "ash-sqlx"
-version = "0.1.0"
-dependencies = [
- "ash-core",
- "ash-sqlx-macros",
- "assert2",
- "serde",
- "sqlx",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "ash-sqlx-macros"
-version = "0.1.0"
-dependencies = [
- "ash-extension-api",
- "assert2",
- "convert_case",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "assert2"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,6 +205,96 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cinderblock-core"
+version = "0.1.0"
+dependencies = [
+ "cinderblock-core-macros",
+ "dirs2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cinderblock-core-macros"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "cinderblock-extension-api",
+ "convert_case",
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "cinderblock-extension-api"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "cinderblock-json-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "cinderblock-core",
+ "cinderblock-json-api-macros",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "cinderblock-json-api-macros"
+version = "0.1.0"
+dependencies = [
+ "cinderblock-extension-api",
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "cinderblock-sqlx"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "cinderblock-core",
+ "cinderblock-sqlx-macros",
+ "serde",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "cinderblock-sqlx-macros"
+version = "0.1.0"
+dependencies = [
+ "assert2",
+ "cinderblock-extension-api",
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "concurrent-queue"

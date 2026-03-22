@@ -1,0 +1,15 @@
+[package]
+name = "cinderblock-sqlx"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+cinderblock-core = { version = "0.1.0", path = "../cinderblock-core" }
+cinderblock-sqlx-macros = { version = "0.1.0", path = "../cinderblock-sqlx-macros" }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "uuid"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+assert2 = "0.4"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

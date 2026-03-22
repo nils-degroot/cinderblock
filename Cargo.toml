@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
 members = [
-	"crates/ash-core",
-	"crates/ash-core-macros",
-	"crates/ash-extension-api",
-	"crates/ash-json-api",
-	"crates/ash-json-api-macros", "crates/ash-sqlx", "crates/ash-sqlx-macros",
+	"crates/cinderblock-core",
+	"crates/cinderblock-core-macros",
+	"crates/cinderblock-extension-api",
+	"crates/cinderblock-json-api",
+	"crates/cinderblock-json-api-macros", "crates/cinderblock-sqlx", "crates/cinderblock-sqlx-macros",
 ]
 
 [workspace.package]
