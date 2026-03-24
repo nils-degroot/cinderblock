@@ -60,7 +60,7 @@
 // ```
 
 use cinderblock_extension_api::ExtensionMacroInput;
-use syn::{parse::Parse, Ident, LitStr};
+use syn::{Ident, LitStr, parse::Parse};
 
 // ---------------------------------------------------------------------------
 // # Config Parsing
@@ -203,6 +203,50 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
     // # Primary key column name literals for the const
     let column_name_literals: Vec<_> = column_names.iter().map(|c| quote::quote! { #c }).collect();
 
+    let read_actions = input
+        .resource
+        .actions
+        .iter()
+        .filter_map(|action| match &action.kind {
+            cinderblock_extension_api::ResourceActionInputKind::Read(action_read) => {
+                Some((action, action_read))
+            }
+            _ => None,
+        })
+        .map(|(action, action_read)| {
+            let filter_count = action_read.filters.len() as u32;
+
+            // TODO: This should come from the parsing crate
+            let action_name = convert_case::ccase!(pascal, action.name.to_string());
+            let action_name = Ident::new(&action_name, action.name.span());
+
+            let filters = action_read.filters.iter().map(|filter| {
+                let field = &filter.field.to_string();
+                let value = &filter.value;
+                let op = match filter.op {
+                    cinderblock_extension_api::ReadFilterOperation::Eq => "=",
+                };
+
+                quote::quote! {
+                    sep.push(format!("{} {} ", #field, #op)).push_bind_unseparated(#value);
+                }
+            });
+
+            quote::quote! {
+                impl cinderblock_sqlx::SqlReadAction for #action_name {
+                    fn filter_count() -> u32 { #filter_count }
+
+                    fn bind_filters(
+                        builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
+                        args: &Self::Arguments
+                    ) {
+                        let mut sep = builder.separated(" AND ");
+                        #(#filters)*
+                    }
+                }
+            }
+        });
+
     quote::quote! {
         impl cinderblock_sqlx::SqlResource for #ident {
             const TABLE_NAME: &'static str = #table_name;
@@ -241,6 +285,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 })
             }
         }
+
+        #(#read_actions)*
     }
     .into()
 }
@@ -252,7 +298,6 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use syn::parse::Parse;
 
     use super::*;
 

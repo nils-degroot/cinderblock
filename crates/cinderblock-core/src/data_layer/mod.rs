@@ -15,11 +15,7 @@ pub trait DataLayer<R: Resource>: std::fmt::Debug + Send + Sync + 'static {
 
     fn update(&self, resource: R) -> impl Future<Output = crate::Result<()>> + Send;
 
-    fn list(&self) -> impl Future<Output = crate::Result<Vec<R>>> + Send;
-
     /// Remove a resource by primary key, returning the deleted resource.
-    fn destroy(
-        &self,
-        primary_key: &R::PrimaryKey,
-    ) -> impl Future<Output = crate::Result<R>> + Send;
+    fn destroy(&self, primary_key: &R::PrimaryKey)
+    -> impl Future<Output = crate::Result<R>> + Send;
 }

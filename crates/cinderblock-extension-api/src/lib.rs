@@ -15,8 +15,8 @@
 //      config type
 
 use syn::{
-    braced, bracketed, parse::Parse, punctuated::Punctuated, ExprClosure, Ident, LitBool, Token,
-    Type,
+    ExprClosure, Ident, LitBool, Path, Token, Type, braced, bracketed, parse::Parse,
+    punctuated::Punctuated,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ use syn::{
 #[derive(Debug)]
 pub struct ResourceMacroInput {
     pub name: Vec<Ident>,
-    pub data_layer: Option<syn::Path>,
+    pub data_layer: Option<Path>,
     pub attributes: Vec<ResourceAttributeInput>,
     pub actions: Vec<ResourceActionInput>,
     pub extensions: Vec<ExtensionDecl>,
@@ -96,12 +96,44 @@ pub struct ResourceActionInput {
 /// The kind-specific payload of an action — create, update, or destroy.
 #[derive(Debug)]
 pub enum ResourceActionInputKind {
+    Read(ActionRead),
     Create {
         accept: Accept,
     },
     Update(ActionUpdate),
     /// Destroy takes no input — the primary key is provided via the URL path.
     Destroy,
+}
+
+#[derive(Debug)]
+pub struct ActionRead {
+    pub filters: Vec<ReadFilter>,
+}
+
+#[derive(Debug)]
+pub struct ReadFilter {
+    pub field: Ident,
+    pub op: ReadFilterOperation,
+    pub value: syn::Expr,
+}
+
+#[derive(Debug)]
+pub enum ReadFilterOperation {
+    Eq,
+}
+
+impl Parse for ReadFilterOperation {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.peek(Token![==]) {
+            let _: Token![==] = input.parse()?;
+            Ok(Self::Eq)
+        } else {
+            Err(syn::Error::new(
+                input.span(),
+                "Unexpected token, expected a filter operation",
+            ))
+        }
+    }
 }
 
 /// Body of an `update` action: which fields to accept and what change
@@ -150,7 +182,7 @@ pub enum UpdateChange {
 #[derive(Debug)]
 pub struct ExtensionDecl {
     /// The module path of the extension (e.g., `cinderblock_json_api`).
-    pub path: syn::Path,
+    pub path: Path,
     /// Raw token stream from inside the extension's config braces.
     pub config_tokens: proc_macro2::TokenStream,
 }
@@ -219,6 +251,48 @@ impl Parse for ResourceActionInput {
         let name: Ident = input.parse()?;
 
         let kind = match kind.to_string().as_str() {
+            "read" => {
+                if input.peek(Token![;]) {
+                    let _: Token![;] = input.parse()?;
+                    ResourceActionInputKind::Read(ActionRead { filters: vec![] })
+                } else {
+                    let content;
+                    braced!(content in input);
+
+                    let mut action = ActionRead { filters: vec![] };
+
+                    while !content.is_empty() {
+                        let key: Ident = content.parse()?;
+
+                        match key.to_string().as_str() {
+                            "filter" => {
+                                let filter_content;
+                                braced!(filter_content in content);
+
+                                action.filters.push(ReadFilter {
+                                    field: filter_content.parse()?,
+                                    op: filter_content.parse()?,
+                                    value: filter_content.parse()?,
+                                });
+
+                                let _: Token![;] = content.parse()?;
+                            }
+                            got => {
+                                return Err(syn::Error::new(
+                                    key.span(),
+                                    format!("Unexpected create keyword, got `{got}`"),
+                                ));
+                            }
+                        }
+                    }
+
+                    if input.peek(Token![;]) {
+                        let _: Token![;] = input.parse()?;
+                    }
+
+                    ResourceActionInputKind::Read(action)
+                }
+            }
             "create" => {
                 if input.peek(Token![;]) {
                     let _: Token![;] = input.parse()?;
@@ -371,7 +445,7 @@ impl Parse for ResourceMacroInput {
                     // the keyword.
                     let _: Ident = input.parse()?;
                     let _: Token![=] = input.parse()?;
-                    let path: syn::Path = input.parse()?;
+                    let path: Path = input.parse()?;
                     let _: Token![;] = input.parse()?;
                     Some(path)
                 } else {
@@ -471,7 +545,7 @@ impl Parse for ResourceMacroInput {
                     braced!(content in input);
 
                     while !content.is_empty() {
-                        let path: syn::Path = content.parse()?;
+                        let path: Path = content.parse()?;
 
                         let config_content;
                         braced!(config_content in content);

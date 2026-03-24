@@ -56,7 +56,7 @@ async fn main() -> cinderblock_core::Result<()> {
     // Initialize tracing so we can see the extension's log output.
     tracing_subscriber::fmt::init();
 
-    let ctx = Context::new("helpdesk_api").await?;
+    let ctx = Context::new();
 
     // Seed some tickets so the list endpoint has data to return.
     cinderblock_core::create::<Ticket, Open>(
@@ -87,8 +87,12 @@ async fn main() -> cinderblock_core::Result<()> {
     println!();
     println!("Try:");
     println!("  curl http://localhost:3000/helpdesk/support/ticket");
-    println!("  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'");
-    println!("  curl -X PATCH http://localhost:3000/helpdesk/support/ticket/<id>/close -H 'Content-Type: application/json' -d '{{}}'");
+    println!(
+        "  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'"
+    );
+    println!(
+        "  curl -X PATCH http://localhost:3000/helpdesk/support/ticket/<id>/close -H 'Content-Type: application/json' -d '{{}}'"
+    );
     println!("  curl -X DELETE http://localhost:3000/helpdesk/support/ticket/<id>/remove");
     println!();
     println!("OpenAPI spec:");

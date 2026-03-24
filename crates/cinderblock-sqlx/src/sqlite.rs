@@ -4,10 +4,10 @@
 // Queries are built dynamically using `sqlx::QueryBuilder` and the column
 // metadata / bind helpers provided by the generated `SqlResource` impl.
 
-use cinderblock_core::data_layer::DataLayer;
-use sqlx::{sqlite::SqliteRow, SqlitePool};
+use cinderblock_core::{PerformRead, ReadAction, Resource, data_layer::DataLayer};
+use sqlx::{SqlitePool, sqlite::SqliteRow};
 
-use crate::SqlResource;
+use crate::{SqlReadAction, SqlResource};
 
 // ---------------------------------------------------------------------------
 // # SqliteDataLayer
@@ -59,7 +59,7 @@ impl SqliteDataLayer {
 
 impl<R> DataLayer<R> for SqliteDataLayer
 where
-    R: cinderblock_core::Resource + SqlResource + 'static,
+    R: Resource + SqlResource + 'static,
 {
     // # INSERT
     //
@@ -114,8 +114,7 @@ where
     // `bind_update` emits the `col = ?` pairs for non-PK columns, then
     // we append the WHERE clause and bind the primary key separately.
     async fn update(&self, resource: R) -> cinderblock_core::Result<()> {
-        let mut builder =
-            sqlx::QueryBuilder::new(format!("UPDATE {} SET ", R::TABLE_NAME));
+        let mut builder = sqlx::QueryBuilder::new(format!("UPDATE {} SET ", R::TABLE_NAME));
 
         resource.bind_update(&mut builder);
 
@@ -129,20 +128,6 @@ where
             .map_err(|e| format!("update `{}`: {e}", R::TABLE_NAME))?;
 
         Ok(())
-    }
-
-    // # SELECT all
-    //
-    // Builds: SELECT * FROM {table}
-    async fn list(&self) -> cinderblock_core::Result<Vec<R>> {
-        let sql = format!("SELECT * FROM {}", R::TABLE_NAME);
-
-        let rows: Vec<SqliteRow> = sqlx::query(&sql)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| format!("list from `{}`: {e}", R::TABLE_NAME))?;
-
-        rows.iter().map(R::from_row).collect()
     }
 
     // # DELETE with RETURNING
@@ -168,5 +153,35 @@ where
             .map_err(|e| format!("destroy from `{}`: {e}", R::TABLE_NAME))?;
 
         R::from_row(&row)
+    }
+}
+
+impl<R, A> PerformRead<A> for SqliteDataLayer
+where
+    R: Resource + SqlResource + 'static,
+    A: ReadAction<Output = R> + SqlReadAction + 'static,
+{
+    async fn read(&self, args: &A::Arguments) -> cinderblock_core::Result<Vec<A::Output>> {
+        let mut builder = sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", R::TABLE_NAME));
+
+        if A::filter_count() > 0 {
+            builder.push("WHERE ");
+            A::bind_filters(&mut builder, args);
+        }
+
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| format!("destroy from `{}`: {e}", R::TABLE_NAME))?;
+
+        let mut result = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let row = R::from_row(&row)?;
+            result.push(row);
+        }
+
+        Ok(result)
     }
 }

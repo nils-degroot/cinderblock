@@ -6,7 +6,7 @@ use std::{
 
 use tokio::sync::RwLock;
 
-use crate::data_layer::DataLayer;
+use crate::{PerformRead, ReadAction, Resource, data_layer::DataLayer};
 
 type State =
     LazyLock<Arc<RwLock<HashMap<TypeId, HashMap<String, Box<dyn Any + Send + Sync + 'static>>>>>>;
@@ -21,7 +21,7 @@ impl InMemoryDataLayer {
     }
 }
 
-impl<R: crate::Resource + 'static> DataLayer<R> for InMemoryDataLayer {
+impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
     async fn create(&self, resource: R) -> crate::Result<()> {
         let state = STATE.clone();
         let mut state = state.write().await;
@@ -68,21 +68,6 @@ impl<R: crate::Resource + 'static> DataLayer<R> for InMemoryDataLayer {
         Ok(())
     }
 
-    async fn list(&self) -> crate::Result<Vec<R>> {
-        let state = STATE.clone();
-        let state = state.read().await;
-
-        Ok(state
-            .get(&TypeId::of::<R>())
-            .map(|map| {
-                map.values()
-                    .filter_map(|r| r.downcast_ref())
-                    .map(R::clone)
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
-
     async fn destroy(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {
         let state = STATE.clone();
         let mut state = state.write().await;
@@ -101,5 +86,29 @@ impl<R: crate::Resource + 'static> DataLayer<R> for InMemoryDataLayer {
             .downcast::<R>()
             .map(|r| *r)
             .map_err(|_| "failed to downcast destroyed resource".into())
+    }
+}
+
+pub trait InMemoryReadAction: ReadAction {
+    fn filter(row: &Self::Output) -> bool;
+}
+
+impl<R, A> PerformRead<A> for InMemoryDataLayer
+where
+    R: Resource + 'static,
+    A: ReadAction<Output = R> + InMemoryReadAction + 'static,
+{
+    async fn read(&self, _args: &A::Arguments) -> crate::Result<Vec<A::Output>> {
+        let state = STATE.clone();
+        let state = state.read().await;
+
+        Ok(state
+            .get(&TypeId::of::<R>())
+            .iter()
+            .flat_map(|map| map.values())
+            .filter_map(|boxed| boxed.downcast_ref::<R>())
+            .filter(|row| A::filter(row))
+            .cloned()
+            .collect())
     }
 }

@@ -9,13 +9,12 @@
 
 use std::sync::Arc;
 
+use assert2::{assert, check};
 use cinderblock_core::{
-    resource,
+    Context, resource,
     serde::{Deserialize, Serialize},
-    Context,
 };
 use cinderblock_sqlx::sqlite::SqliteDataLayer;
-use assert2::{assert, check};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -48,6 +47,16 @@ resource! {
     }
 
     actions {
+        read all;
+
+        read important_tasks {
+            filter { priority == Priority::High };
+        }
+
+        read open_tasks {
+            filter { done == false };
+        }
+
         create add;
 
         update complete {
@@ -95,7 +104,7 @@ async fn setup() -> (Arc<Context>, SqliteDataLayer) {
     .await
     .expect("create tasks table");
 
-    let mut ctx = Context::new("test").await.expect("create context");
+    let mut ctx = Context::new();
     ctx.register_data_layer(dl.clone());
 
     (Arc::new(ctx), dl)
@@ -120,7 +129,9 @@ async fn create_and_read_back_via_list() {
     .await
     .expect("create task");
 
-    let tasks = cinderblock_core::list::<Task>(&ctx).await.expect("list tasks");
+    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+        .await
+        .expect("list tasks");
 
     check!(tasks.len() == 1);
     check!(tasks[0].task_id == created.task_id);
@@ -131,7 +142,7 @@ async fn create_and_read_back_via_list() {
 
 #[tokio::test]
 async fn read_by_primary_key() {
-    let (ctx, _dl) = setup().await;
+    let (ctx, dl) = setup().await;
 
     let created = cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -145,8 +156,7 @@ async fn read_by_primary_key() {
     .expect("create task");
 
     // Read directly via the data layer trait (through the context).
-    let dl = ctx.get_data_layer::<SqliteDataLayer>();
-    let fetched = cinderblock_core::data_layer::DataLayer::<Task>::read(dl, &created.task_id)
+    let fetched = cinderblock_core::data_layer::DataLayer::<Task>::read(&dl, &created.task_id)
         .await
         .expect("read task by PK");
 
@@ -174,16 +184,20 @@ async fn update_modifies_row() {
     check!(created.done == false);
 
     // The `complete` action sets `done = true` via its change_ref closure.
-    let updated = cinderblock_core::update::<Task, Complete>(&created.task_id, CompleteInput {}, &ctx)
-        .await
-        .expect("update task");
+    let updated =
+        cinderblock_core::update::<Task, Complete>(&created.task_id, CompleteInput {}, &ctx)
+            .await
+            .expect("update task");
 
     check!(updated.done == true);
     check!(updated.task_id == created.task_id);
     check!(updated.title == "Incomplete task");
 
     // Verify the change persisted in the database.
-    let tasks = cinderblock_core::list::<Task>(&ctx).await.expect("list tasks");
+    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+        .await
+        .expect("list tasks");
+
     check!(tasks.len() == 1);
     check!(tasks[0].done == true);
 }
@@ -205,7 +219,10 @@ async fn list_returns_all_resources() {
         .expect("create task");
     }
 
-    let tasks = cinderblock_core::list::<Task>(&ctx).await.expect("list tasks");
+    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+        .await
+        .expect("list tasks");
+
     check!(tasks.len() == 3);
 
     // Verify all titles are present (order is not guaranteed by SQL without
@@ -230,16 +247,18 @@ async fn destroy_deletes_and_returns_resource() {
     .await
     .expect("create task");
 
-    let destroyed =
-        cinderblock_core::destroy::<Task, Remove>(&created.task_id, &ctx)
-            .await
-            .expect("destroy task");
+    let destroyed = cinderblock_core::destroy::<Task, Remove>(&created.task_id, &ctx)
+        .await
+        .expect("destroy task");
 
     check!(destroyed.task_id == created.task_id);
     check!(destroyed.title == "Doomed task");
 
     // Verify the table is now empty.
-    let tasks = cinderblock_core::list::<Task>(&ctx).await.expect("list tasks");
+    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+        .await
+        .expect("list tasks");
+
     check!(tasks.is_empty());
 }
 
@@ -283,8 +302,81 @@ async fn create_multiple_then_destroy_one() {
         .await
         .expect("destroy task B");
 
-    let remaining = cinderblock_core::list::<Task>(&ctx).await.expect("list tasks");
+    let remaining = cinderblock_core::read::<Task, All>(&ctx, &())
+        .await
+        .expect("list tasks");
+
     check!(remaining.len() == 1);
     check!(remaining[0].task_id == task_a.task_id);
     check!(remaining[0].title == "Keep me");
+}
+
+#[tokio::test]
+async fn read_actions_with_filter() {
+    let (ctx, _dl) = setup().await;
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "Not so important".to_string(),
+            priority: Priority::Low,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create task A");
+
+    let expected = cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "Very import".to_string(),
+            priority: Priority::High,
+            done: true,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create task B");
+
+    let open_tasks = cinderblock_core::read::<Task, ImportantTasks>(&ctx, &())
+        .await
+        .expect("destroy task B");
+
+    check!(open_tasks.len() == 1);
+    check!(open_tasks[0].task_id == expected.task_id);
+    check!(open_tasks[0].title == expected.title);
+}
+
+#[tokio::test]
+async fn read_actions_with_filter_2() {
+    let (ctx, _dl) = setup().await;
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "Closed".to_string(),
+            priority: Priority::Low,
+            done: true,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create task A");
+
+    let expected = cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "Open".to_string(),
+            priority: Priority::Medium,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create task B");
+
+    let open_tasks = cinderblock_core::read::<Task, OpenTasks>(&ctx, &())
+        .await
+        .expect("destroy task B");
+
+    check!(open_tasks.len() == 1);
+    check!(open_tasks[0].task_id == expected.task_id);
+    check!(open_tasks[0].title == expected.title);
 }

@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use cinderblock_core::{
     Context, resource,
     serde::{Deserialize, Serialize},
@@ -20,6 +22,10 @@ resource! {
     }
 
     actions {
+        read open_tickets {
+            filter { status == TicketStatus::Open };
+        };
+
         create open;
 
         create assign {
@@ -36,7 +42,7 @@ resource! {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 enum TicketStatus {
     #[default]
     Open,
@@ -45,9 +51,7 @@ enum TicketStatus {
 
 #[tokio::main]
 async fn main() {
-    let ctx = Context::new("helpdesk")
-        .await
-        .expect("Failed to setup context");
+    let ctx = Context::new();
 
     cinderblock_core::create::<Ticket, Open>(
         OpenInput {
@@ -72,39 +76,44 @@ async fn main() {
 
     println!("Created a new ticket using assign");
 
-    let tickets = cinderblock_core::list::<Ticket>(&ctx)
+    let tickets = cinderblock_core::read::<Ticket, OpenTickets>(&ctx, &())
         .await
-        .expect("Failed to list tickets");
+        .expect("Failed to list the open tickets");
 
     println!("Found these tickets:\n");
 
     for ticket in &tickets {
-        println!(
-            "id: {}\n\tsubject: {}\n\tstatus: {:?}\n",
-            ticket.ticket_id, ticket.subject, ticket.status
-        )
+        println!("{ticket}\n");
     }
 
     // Close the first ticket using the update action.
     let first_ticket = &tickets[0];
     println!("Closing ticket: {}", first_ticket.ticket_id);
 
-    let closed = cinderblock_core::update::<Ticket, Close>(&first_ticket.ticket_id, CloseInput {}, &ctx)
-        .await
-        .expect("Failed to close ticket");
+    let closed =
+        cinderblock_core::update::<Ticket, Close>(&first_ticket.ticket_id, CloseInput {}, &ctx)
+            .await
+            .expect("Failed to close ticket");
 
     println!("Ticket closed: {:?}\n", closed.status);
 
-    let tickets = cinderblock_core::list::<Ticket>(&ctx)
+    let tickets = cinderblock_core::read::<Ticket, OpenTickets>(&ctx, &())
         .await
-        .expect("Failed to list tickets");
+        .expect("Failed to list the open tickets");
 
     println!("Tickets after closing:\n");
 
     for ticket in &tickets {
-        println!(
-            "id: {}\n\tsubject: {}\n\tstatus: {:?}\n",
-            ticket.ticket_id, ticket.subject, ticket.status
+        println!("{ticket}\n");
+    }
+}
+
+impl Display for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "id: {}\n\tsubject: {}\n\tstatus: {:?}",
+            self.ticket_id, self.subject, self.status
         )
     }
 }

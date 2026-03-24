@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use cinderblock_extension_api::{
     Accept, ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput, UpdateChange,
 };
-use syn::{spanned::Spanned, Ident};
+use syn::{Ident, spanned::Spanned};
 
 #[proc_macro]
 pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -69,7 +69,51 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     };
 
+    let data_layer_specified = input.data_layer.is_some();
+
     let actions = input.actions.iter().map(|action| match &action.kind {
+        ResourceActionInputKind::Read(read_action) => {
+            let action_name = convert_case::ccase!(pascal, action.name.to_string());
+            let action_name = Ident::new(&action_name, action.name.span());
+
+            // Setup InMemoryReadAction if no data layer is provided
+            let data_layer_block = if data_layer_specified {
+                quote::quote! { }
+            } else {
+                let filters = read_action.filters.iter().map(|filter| {
+                    let field = &filter.field;
+                    let value = &filter.value;
+
+                    let op = match filter.op {
+                        cinderblock_extension_api::ReadFilterOperation::Eq => quote::quote! { == },
+                    };
+
+                    quote::quote! {
+                        row.#field #op #value &&
+                    }
+                });
+
+                quote::quote! {
+                    impl cinderblock_core::data_layer::in_memory::InMemoryReadAction for #action_name {
+                        fn filter(row: &Self::Output) -> bool {
+                            #(#filters)* true
+                        }
+                    }
+                }
+            };
+
+            quote::quote! {
+                struct #action_name;
+
+                impl cinderblock_core::ReadAction for #action_name {
+                    type Output = #ident;
+
+                    type Arguments = ();
+                }
+
+                #data_layer_block
+            }
+        }
         ResourceActionInputKind::Create { accept } => {
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
@@ -304,8 +348,8 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cinderblock_extension_api::ResourceActionInput;
     use assert2::{assert, check};
+    use cinderblock_extension_api::ResourceActionInput;
     use quote::quote;
 
     fn parse_resource(tokens: proc_macro2::TokenStream) -> ResourceMacroInput {

@@ -20,6 +20,7 @@
 // Type`). For custom types like enums, the user implements sqlx's traits
 // directly — or uses `#[sqlx(type_name = "...")]` / serde-based approaches.
 
+use cinderblock_core::ReadAction;
 pub use cinderblock_sqlx_macros::__resource_extension;
 pub use sqlx;
 
@@ -70,4 +71,10 @@ pub trait SqlResource: cinderblock_core::Resource {
 
     /// Decode all columns from a row and reconstruct the resource.
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> cinderblock_core::Result<Self>;
+}
+
+pub trait SqlReadAction: ReadAction {
+    fn filter_count() -> u32;
+
+    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments);
 }

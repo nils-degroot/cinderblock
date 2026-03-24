@@ -39,7 +39,7 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
-use syn::{bracketed, parse::Parse, Ident, LitBool, Token};
+use syn::{Ident, LitBool, Token, bracketed, parse::Parse};
 
 /// Extension-specific configuration parsed from inside the `config = { ... }`
 /// block.
@@ -715,8 +715,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         config.should_create(&action_name_str)
                     }
                     ResourceActionInputKind::Update(_) => config.should_update(&action_name_str),
-                    // Destroy has no input struct, so no schema component needed.
                     ResourceActionInputKind::Destroy => return None,
+                    ResourceActionInputKind::Read(_action_read) => todo!("Implement this"),
                 };
 
                 if !is_enabled {
