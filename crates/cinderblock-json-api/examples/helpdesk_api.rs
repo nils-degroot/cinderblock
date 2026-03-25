@@ -38,7 +38,9 @@ resource! {
     }
 
     extensions {
-        cinderblock_json_api {};
+        cinderblock_json_api {
+            list = false;
+        };
     }
 }
 
