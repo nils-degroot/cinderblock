@@ -20,6 +20,12 @@ resource! {
     }
 
     actions {
+        read open_tickets {
+            filter { status == TicketStatus::Open };
+        };
+
+        read all;
+
         create open;
 
         create assign {
@@ -38,13 +44,13 @@ resource! {
     }
 
     extensions {
-        cinderblock_json_api {
-            list = false;
-        };
+        cinderblock_json_api {};
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, cinderblock_json_api::utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, cinderblock_json_api::utoipa::ToSchema,
+)]
 enum TicketStatus {
     #[default]
     Open,
@@ -88,7 +94,8 @@ async fn main() -> cinderblock_core::Result<()> {
     println!("Listening on http://0.0.0.0:3000");
     println!();
     println!("Try:");
-    println!("  curl http://localhost:3000/helpdesk/support/ticket");
+    println!("  curl http://localhost:3000/helpdesk/support/ticket/all");
+    println!("  curl http://localhost:3000/helpdesk/support/ticket/open-tickets");
     println!(
         "  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'"
     );

@@ -12,7 +12,8 @@
 //
 // # Supported endpoints
 //
-// - **list**: `GET /resource_path` — returns all resources
+// - **read**: `GET /resource_path/:action` — returns filtered resources via
+//   the named read action
 // - **create**: `POST /resource_path/:action` — creates a resource via the
 //   named action
 // - **update**: `PATCH /resource_path/{primary_key}/:action` — updates a
@@ -22,16 +23,16 @@
 //
 // # Config semantics
 //
-// An empty config block (`cinderblock_json_api {}`) exposes everything: the list
-// endpoint plus all declared create, update, and destroy actions. If any of
-// `list`, `create`, `update`, or `destroy` is explicitly specified, only
-// those are exposed.
+// An empty config block (`cinderblock_json_api {}`) exposes everything: all
+// declared read, create, update, and destroy actions. If any of `read`,
+// `create`, `update`, or `destroy` is explicitly specified, only those are
+// exposed.
 //
 // ```text
 // cinderblock_json_api {};                          // expose everything
-// cinderblock_json_api { list = true; };            // only list
+// cinderblock_json_api { read = [all]; };           // only the "all" read action
 // cinderblock_json_api { create = [open]; };        // only the "open" create action
-// cinderblock_json_api { create = [open]; list = true; };  // list + open
+// cinderblock_json_api { create = [open]; read = [all]; };  // read all + create open
 // cinderblock_json_api { destroy = [remove]; };     // only the "remove" destroy action
 // cinderblock_json_api { openapi = false; };        // expose everything, no OpenAPI
 // ```
@@ -39,7 +40,7 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
-use syn::{Ident, LitBool, Token, bracketed, parse::Parse};
+use syn::{bracketed, parse::Parse, Ident, LitBool, Token};
 
 /// Extension-specific configuration parsed from inside the `config = { ... }`
 /// block.
@@ -48,7 +49,7 @@ use syn::{Ident, LitBool, Token, bracketed, parse::Parse};
 /// everything. When any field is `Some`, only the explicitly enabled
 /// endpoints are generated.
 struct JsonApiConfig {
-    list: Option<bool>,
+    read: Option<Vec<Ident>>,
     create: Option<Vec<Ident>>,
     update: Option<Vec<Ident>>,
     destroy: Option<Vec<Ident>>,
@@ -65,7 +66,7 @@ impl JsonApiConfig {
     /// Note: `openapi` is intentionally excluded — it controls schema
     /// generation, not endpoint selection.
     fn is_explicit(&self) -> bool {
-        self.list.is_some()
+        self.read.is_some()
             || self.create.is_some()
             || self.update.is_some()
             || self.destroy.is_some()
@@ -76,9 +77,11 @@ impl JsonApiConfig {
         self.openapi.unwrap_or(true)
     }
 
-    fn should_list(&self) -> bool {
+    fn should_read(&self, action_name: &str) -> bool {
         if self.is_explicit() {
-            self.list.unwrap_or(false)
+            self.read
+                .as_ref()
+                .is_some_and(|names| names.iter().any(|n| n == action_name))
         } else {
             true
         }
@@ -118,7 +121,7 @@ impl JsonApiConfig {
 impl Parse for JsonApiConfig {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut config = JsonApiConfig {
-            list: None,
+            read: None,
             create: None,
             update: None,
             destroy: None,
@@ -132,9 +135,17 @@ impl Parse for JsonApiConfig {
             let key: Ident = input.fork().parse()?;
 
             match key.to_string().as_str() {
-                "list" => {
-                    let (_, value) = cinderblock_extension_api::parse_attribute::<LitBool>(input)?;
-                    config.list = Some(value.value());
+                "read" => {
+                    let _: Ident = input.parse()?;
+                    let _: Token![=] = input.parse()?;
+                    let content;
+                    bracketed!(content in input);
+                    let names = content
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                    config.read = Some(names);
+                    let _: Token![;] = input.parse()?;
                 }
                 "create" => {
                     let _: Ident = input.parse()?;
@@ -231,15 +242,16 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
     // # Route path derivation
     //
-    // The base route path is built by lowercasing each name segment and
-    // joining with `/`. For example, `Helpdesk.Support.Ticket` becomes
-    // `/helpdesk/support/ticket`.
+    // The base route path is built by converting each name segment to
+    // kebab-case and joining with `/`. For example,
+    // `Helpdesk.Support.Ticket` becomes `/helpdesk/support/ticket` and
+    // `Helpdesk.SupportTicket` becomes `/helpdesk/support-ticket`.
     let base_path = format!(
         "/{}",
         resource
             .name
             .iter()
-            .map(|s| s.to_string().to_lowercase())
+            .map(|s| convert_case::ccase!(kebab, s.to_string()))
             .collect::<Vec<_>>()
             .join("/")
     );
@@ -255,18 +267,38 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
     let register_fn_name = Ident::new(&format!("__register_json_api_{name_slug}"), ident.span());
 
-    // # List endpoint
+    // # Read endpoints
     //
-    // GET /helpdesk/support/ticket → returns all resources
-    let list_route = if config.should_list() {
-        let route_path = &base_path;
+    // GET /helpdesk/support/ticket/open-tickets → returns filtered resources
+    //
+    // For each read action declared on the resource, we generate a GET
+    // route. The action name is converted to kebab-case for the URL path
+    // segment and to PascalCase to reference the generated marker struct.
+    let read_routes = resource.actions.iter().filter_map(|action| {
+        match &action.kind {
+            ResourceActionInputKind::Read(_) => {}
+            _ => return None,
+        }
+
+        let action_name_str = action.name.to_string();
+        if !config.should_read(&action_name_str) {
+            return None;
+        }
+
+        let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+        let route_path = format!("{}/{}", base_path, action_path_name);
+
+        let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+        let action_type = Ident::new(&action_type_name, action.name.span());
+
         Some(quote::quote! {
             {
                 let ctx = ctx.clone();
                 cinderblock_json_api::tracing::info!(
                     resource = stringify!(#ident),
+                    action = #action_name_str,
                     route = #route_path,
-                    "registering JSON API list endpoint"
+                    "registering JSON API read endpoint"
                 );
                 router = router.route(
                     #route_path,
@@ -275,10 +307,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         async move {
                             cinderblock_json_api::tracing::info!(
                                 resource = stringify!(#ident),
-                                "handling list request"
+                                action = #action_name_str,
+                                "handling read request"
                             );
 
-                            match cinderblock_core::list::<#ident>(&ctx).await {
+                            match cinderblock_core::read::<#ident, #action_type>(&ctx, &()).await {
                                 Ok(results) => (
                                     cinderblock_json_api::axum::http::StatusCode::OK,
                                     cinderblock_json_api::axum::Json(
@@ -289,8 +322,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 Err(err) => {
                                     cinderblock_json_api::tracing::error!(
                                         resource = stringify!(#ident),
+                                        action = #action_name_str,
                                         error = %err,
-                                        "list request failed"
+                                        "read request failed"
                                     );
                                     (
                                         cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -304,17 +338,16 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 );
             }
         })
-    } else {
-        None
-    };
+    });
 
     // # Create endpoints
     //
     // POST /helpdesk/support/ticket/open → creates via the "open" action
     //
     // For each create action declared on the resource, we generate a POST
-    // route. The action name is used as a path segment and converted to
-    // PascalCase to reference the generated marker and input structs.
+    // route. The action name is converted to kebab-case for the URL path
+    // segment and to PascalCase to reference the generated marker and
+    // input structs.
     let create_routes = resource.actions.iter().filter_map(|action| {
         match &action.kind {
             ResourceActionInputKind::Create { .. } => {}
@@ -326,7 +359,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             return None;
         }
 
-        let route_path = format!("{}/{}", base_path, action_name_str);
+        let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+        let route_path = format!("{}/{}", base_path, action_path_name);
 
         let action_type_name = convert_case::ccase!(pascal, &action_name_str);
         let action_type = Ident::new(&action_type_name, action.name.span());
@@ -401,7 +435,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             return None;
         }
 
-        let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+        let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+        let route_path = format!("{}/{{primary_key}}/{}", base_path, action_path_name);
 
         let action_type_name = convert_case::ccase!(pascal, &action_name_str);
         let action_type = Ident::new(&action_type_name, action.name.span());
@@ -488,7 +523,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             return None;
         }
 
-        let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+        let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+        let route_path = format!("{}/{{primary_key}}/{}", base_path, action_path_name);
 
         let action_type_name = convert_case::ccase!(pascal, &action_name_str);
         let action_type = Ident::new(&action_type_name, action.name.span());
@@ -715,8 +751,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         config.should_create(&action_name_str)
                     }
                     ResourceActionInputKind::Update(_) => config.should_update(&action_name_str),
-                    ResourceActionInputKind::Destroy => return None,
-                    ResourceActionInputKind::Read(_action_read) => todo!("Implement this"),
+                    ResourceActionInputKind::Destroy | ResourceActionInputKind::Read(_) => {
+                        return None;
+                    }
                 };
 
                 if !is_enabled {
@@ -733,54 +770,71 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             .collect();
 
         // Path items for each enabled endpoint.
-        let ident_lower = ident.to_string().to_lowercase();
+        let ident_kebab = convert_case::ccase!(kebab, ident.to_string());
 
-        let list_path_item = if config.should_list() {
-            let operation_id = format!("list_{ident_lower}");
-            let base_path_val = base_path.clone();
-            Some(quote::quote! {
-                // List endpoint: GET /base_path
-                .path(
-                    #base_path_val,
-                    cinderblock_json_api::utoipa::openapi::PathItem::new(
-                        cinderblock_json_api::utoipa::openapi::path::HttpMethod::Get,
-                        cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
-                            .operation_id(Some(#operation_id))
-                            .tag(#ident_str)
-                            .summary(Some(format!("List all {}s", #ident_str)))
-                            .response(
-                                "200",
-                                cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
-                                    .description(format!("List of {}s", #ident_str))
-                                    .content(
-                                        "application/json",
-                                        cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
-                                            .schema(Some(
-                                                // Response<Vec<Resource>>
-                                                cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
-                                                    .schema_type(
-                                                        cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
-                                                            cinderblock_json_api::utoipa::openapi::schema::Type::Object,
-                                                        ),
-                                                    )
-                                                    .property(
-                                                        "data",
-                                                        cinderblock_json_api::utoipa::openapi::schema::ArrayBuilder::new()
-                                                            .items(<#ident as cinderblock_json_api::utoipa::PartialSchema>::schema()),
-                                                    )
-                                                    .required("data"),
-                                            ))
-                                            .build(),
-                                    )
-                                    .build(),
-                            )
-                            .build(),
-                    ),
-                )
+        // # Read path items
+        //
+        // GET /resource/action-name → returns filtered resources as
+        // `Response<Vec<Resource>>`
+        let read_path_items: Vec<_> = resource
+            .actions
+            .iter()
+            .filter_map(|action| {
+                match &action.kind {
+                    ResourceActionInputKind::Read(_) => {}
+                    _ => return None,
+                }
+
+                let action_name_str = action.name.to_string();
+                if !config.should_read(&action_name_str) {
+                    return None;
+                }
+
+                let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+                let route_path = format!("{}/{}", base_path, action_path_name);
+                let operation_id = format!("read-{}-{}", ident_kebab, action_path_name);
+
+                Some(quote::quote! {
+                    .path(
+                        #route_path,
+                        cinderblock_json_api::utoipa::openapi::PathItem::new(
+                            cinderblock_json_api::utoipa::openapi::path::HttpMethod::Get,
+                            cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
+                                .operation_id(Some(#operation_id))
+                                .tag(#ident_str)
+                                .summary(Some(format!("Read {} via {}", #ident_str, #action_name_str)))
+                                .response(
+                                    "200",
+                                    cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
+                                        .description(format!("Filtered list of {}s", #ident_str))
+                                        .content(
+                                            "application/json",
+                                            cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
+                                                .schema(Some(
+                                                    // Response<Vec<Resource>>
+                                                    cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                                        .schema_type(
+                                                            cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                                cinderblock_json_api::utoipa::openapi::schema::Type::Object,
+                                                            ),
+                                                        )
+                                                        .property(
+                                                            "data",
+                                                            cinderblock_json_api::utoipa::openapi::schema::ArrayBuilder::new()
+                                                                .items(<#ident as cinderblock_json_api::utoipa::PartialSchema>::schema()),
+                                                        )
+                                                        .required("data"),
+                                                ))
+                                                .build(),
+                                        )
+                                        .build(),
+                                )
+                                .build(),
+                        ),
+                    )
+                })
             })
-        } else {
-            None
-        };
+            .collect();
 
         let create_path_items: Vec<_> = resource
             .actions
@@ -796,11 +850,12 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     return None;
                 }
 
-                let route_path = format!("{}/{}", base_path, action_name_str);
+                let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+                let route_path = format!("{}/{}", base_path, action_path_name);
                 let action_type_name = convert_case::ccase!(pascal, &action_name_str);
                 let input_type =
                     Ident::new(&format!("{action_type_name}Input"), action.name.span());
-                let operation_id = format!("create_{}_{}", ident_lower, action_name_str);
+                let operation_id = format!("create-{}-{}", ident_kebab, action_path_name);
 
                 // Determine if the request body should be required (i.e., the
                 // input struct has at least one field).
@@ -878,11 +933,12 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     return None;
                 }
 
-                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
+                let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_path_name);
                 let action_type_name = convert_case::ccase!(pascal, &action_name_str);
                 let input_type =
                     Ident::new(&format!("{action_type_name}Input"), action.name.span());
-                let operation_id = format!("update_{}_{}", ident_lower, action_name_str);
+                let operation_id = format!("update-{}-{}", ident_kebab, action_path_name);
 
                 let fields = input_fields_for_accept(&resource.attributes, &update.accept);
                 let body_required = !fields.is_empty();
@@ -985,8 +1041,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     return None;
                 }
 
-                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_name_str);
-                let operation_id = format!("destroy_{}_{}", ident_lower, action_name_str);
+                let action_path_name = convert_case::ccase!(kebab, &action_name_str);
+                let route_path = format!("{}/{{primary_key}}/{}", base_path, action_path_name);
+                let operation_id = format!("destroy-{}-{}", ident_kebab, action_path_name);
 
                 // Find the primary key type for the path parameter schema.
                 let pk_type = resource
@@ -1045,7 +1102,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     ))
                     .paths(
                         cinderblock_json_api::utoipa::openapi::PathsBuilder::new()
-                            #list_path_item
+                            #(#read_path_items)*
                             #(#create_path_items)*
                             #(#update_path_items)*
                             #(#destroy_path_items)*
@@ -1077,7 +1134,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         ) -> cinderblock_json_api::axum::Router {
             use cinderblock_json_api::axum::response::IntoResponse;
 
-            #list_route
+            #(#read_routes)*
             #(#create_routes)*
             #(#update_routes)*
             #(#destroy_routes)*
