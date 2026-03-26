@@ -74,7 +74,12 @@ pub trait SqlResource: cinderblock_core::Resource {
 }
 
 pub trait SqlReadAction: ReadAction {
-    fn filter_count() -> u32;
-
-    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments);
+    /// Conditionally push filter clauses (including the WHERE keyword) into
+    /// the query builder. Returns `true` if any WHERE conditions were added.
+    ///
+    /// This method handles the WHERE keyword internally so that optional
+    /// arguments (which may or may not produce a clause) work correctly
+    /// without the caller needing to predict the filter count.
+    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments)
+        -> bool;
 }

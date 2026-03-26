@@ -90,7 +90,7 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
 }
 
 pub trait InMemoryReadAction: ReadAction {
-    fn filter(row: &Self::Output) -> bool;
+    fn filter(row: &Self::Output, args: &Self::Arguments) -> bool;
 }
 
 impl<R, A> PerformRead<A> for InMemoryDataLayer
@@ -98,7 +98,7 @@ where
     R: Resource + 'static,
     A: ReadAction<Output = R> + InMemoryReadAction + 'static,
 {
-    async fn read(&self, _args: &A::Arguments) -> crate::Result<Vec<A::Output>> {
+    async fn read(&self, args: &A::Arguments) -> crate::Result<Vec<A::Output>> {
         let state = STATE.clone();
         let state = state.read().await;
 
@@ -107,7 +107,7 @@ where
             .iter()
             .flat_map(|map| map.values())
             .filter_map(|boxed| boxed.downcast_ref::<R>())
-            .filter(|row| A::filter(row))
+            .filter(|row| A::filter(row, args))
             .cloned()
             .collect())
     }

@@ -20,11 +20,13 @@ resource! {
     }
 
     actions {
-        read open_tickets {
-            filter { status == TicketStatus::Open };
-        };
+        read all {
+            argument {
+                status: TicketStatus,
+            };
 
-        read all;
+            filter { status == arg(status) };
+        };
 
         create open;
 
@@ -49,7 +51,14 @@ resource! {
 }
 
 #[derive(
-    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, cinderblock_json_api::utoipa::ToSchema,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    cinderblock_json_api::utoipa::ToSchema,
 )]
 enum TicketStatus {
     #[default]

@@ -59,8 +59,21 @@
 // }
 // ```
 
-use cinderblock_extension_api::ExtensionMacroInput;
-use syn::{Ident, LitStr, parse::Parse};
+use cinderblock_extension_api::{ExtensionMacroInput, ReadFilterValue};
+use syn::{parse::Parse, Ident, LitStr, Type};
+
+/// Checks whether a `syn::Type` is `Option<T>`.
+fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Option")
+    } else {
+        false
+    }
+}
 
 // ---------------------------------------------------------------------------
 // # Config Parsing
@@ -214,34 +227,78 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             _ => None,
         })
         .map(|(action, action_read)| {
-            let filter_count = action_read.filters.len() as u32;
-
             // TODO: This should come from the parsing crate
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
-            let filters = action_read.filters.iter().map(|filter| {
-                let field = &filter.field.to_string();
-                let value = &filter.value;
+            // # SQL filter generation
+            //
+            // We split filters into two categories:
+            //
+            // 1. **Static filters** — always applied (literal values and
+            //    required `arg()` references). These are unconditionally
+            //    pushed into the WHERE clause.
+            //
+            // 2. **Conditional filters** — `arg()` references to `Option<T>`
+            //    arguments. These are only added to the WHERE clause when
+            //    the argument value is `Some`.
+            //
+            // Because optional arguments make the total number of WHERE
+            // clauses unknown at compile time, `bind_filters` handles
+            // emitting the WHERE keyword and AND separators dynamically
+            // using a `filter_count` counter.
+
+            let filter_stmts: Vec<_> = action_read.filters.iter().map(|filter| {
+                let field_str = filter.field.to_string();
                 let op = match filter.op {
                     cinderblock_extension_api::ReadFilterOperation::Eq => "=",
                 };
 
-                quote::quote! {
-                    sep.push(format!("{} {} ", #field, #op)).push_bind_unseparated(#value);
+                match &filter.value {
+                    ReadFilterValue::Literal(expr) => {
+                        quote::quote! {
+                            if filter_count > 0 { builder.push(" AND "); } else { builder.push("WHERE "); }
+                            builder.push(format!("{} {} ", #field_str, #op)).push_bind(#expr);
+                            filter_count += 1;
+                        }
+                    }
+                    ReadFilterValue::Arg(arg_name) => {
+                        let arg_decl = action_read
+                            .arguments
+                            .iter()
+                            .find(|a| a.name == *arg_name)
+                            .expect("arg reference validated during parsing");
+
+                        if is_option_type(&arg_decl.ty) {
+                            // Optional: only push the clause when Some
+                            quote::quote! {
+                                if let Some(ref val) = args.#arg_name {
+                                    if filter_count > 0 { builder.push(" AND "); } else { builder.push("WHERE "); }
+                                    builder.push(format!("{} {} ", #field_str, #op)).push_bind(val.clone());
+                                    filter_count += 1;
+                                }
+                            }
+                        } else {
+                            // Required: always push
+                            quote::quote! {
+                                if filter_count > 0 { builder.push(" AND "); } else { builder.push("WHERE "); }
+                                builder.push(format!("{} {} ", #field_str, #op)).push_bind(args.#arg_name.clone());
+                                filter_count += 1;
+                            }
+                        }
+                    }
                 }
-            });
+            }).collect();
 
             quote::quote! {
                 impl cinderblock_sqlx::SqlReadAction for #action_name {
-                    fn filter_count() -> u32 { #filter_count }
-
                     fn bind_filters(
                         builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
-                        args: &Self::Arguments
-                    ) {
-                        let mut sep = builder.separated(" AND ");
-                        #(#filters)*
+                        args: &Self::Arguments,
+                    ) -> bool {
+                        let mut filter_count: u32 = 0;
+                        #(#filter_stmts)*
+                        filter_count > 0
                     }
                 }
             }

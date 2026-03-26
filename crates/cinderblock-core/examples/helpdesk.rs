@@ -26,6 +26,11 @@ resource! {
             filter { status == TicketStatus::Open };
         };
 
+        read by_status {
+            argument { status: TicketStatus };
+            filter { status == arg(status) };
+        };
+
         create open;
 
         create assign {
@@ -85,6 +90,18 @@ async fn main() {
     for ticket in &tickets {
         println!("{ticket}\n");
     }
+
+    // Demonstrate runtime arguments — query by status.
+    let closed_tickets = cinderblock_core::read::<Ticket, ByStatus>(
+        &ctx,
+        &ByStatusArguments {
+            status: TicketStatus::Closed,
+        },
+    )
+    .await
+    .expect("Failed to list closed tickets");
+
+    println!("Closed tickets: {}\n", closed_tickets.len());
 
     // Close the first ticket using the update action.
     let first_ticket = &tickets[0];

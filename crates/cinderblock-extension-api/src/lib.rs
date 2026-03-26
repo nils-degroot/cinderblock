@@ -15,8 +15,8 @@
 //      config type
 
 use syn::{
-    ExprClosure, Ident, LitBool, Path, Token, Type, braced, bracketed, parse::Parse,
-    punctuated::Punctuated,
+    braced, bracketed, parenthesized, parse::Parse, punctuated::Punctuated, ExprClosure, Ident,
+    LitBool, Path, Token, Type,
 };
 
 // ---------------------------------------------------------------------------
@@ -107,14 +107,35 @@ pub enum ResourceActionInputKind {
 
 #[derive(Debug)]
 pub struct ActionRead {
+    pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
+}
+
+/// A single argument declared in a read action's `argument { ... }` block.
+///
+/// Optionality is determined by the Rust type itself: if the user writes
+/// `Option<String>`, it's optional; if they write `String`, it's required.
+/// No separate keyword is needed.
+#[derive(Debug)]
+pub struct ReadArgument {
+    pub name: Ident,
+    pub ty: Type,
 }
 
 #[derive(Debug)]
 pub struct ReadFilter {
     pub field: Ident,
     pub op: ReadFilterOperation,
-    pub value: syn::Expr,
+    pub value: ReadFilterValue,
+}
+
+/// The right-hand side of a filter expression. Either a compile-time literal
+/// expression (e.g., `false`, `42`, `TicketStatus::Open`) or a reference to a
+/// runtime argument via `arg(name)`.
+#[derive(Debug)]
+pub enum ReadFilterValue {
+    Literal(syn::Expr),
+    Arg(Ident),
 }
 
 #[derive(Debug)]
@@ -133,6 +154,16 @@ impl Parse for ReadFilterOperation {
                 "Unexpected token, expected a filter operation",
             ))
         }
+    }
+}
+
+impl Parse for ReadArgument {
+    /// Parses `name: Type` — a single argument declaration.
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        let _: Token![:] = input.parse()?;
+        let ty: Type = input.parse()?;
+        Ok(ReadArgument { name, ty })
     }
 }
 
@@ -254,35 +285,91 @@ impl Parse for ResourceActionInput {
             "read" => {
                 if input.peek(Token![;]) {
                     let _: Token![;] = input.parse()?;
-                    ResourceActionInputKind::Read(ActionRead { filters: vec![] })
+                    ResourceActionInputKind::Read(ActionRead {
+                        arguments: vec![],
+                        filters: vec![],
+                    })
                 } else {
                     let content;
                     braced!(content in input);
 
-                    let mut action = ActionRead { filters: vec![] };
+                    let mut action = ActionRead {
+                        arguments: vec![],
+                        filters: vec![],
+                    };
 
                     while !content.is_empty() {
                         let key: Ident = content.parse()?;
 
                         match key.to_string().as_str() {
+                            "argument" => {
+                                // Parses `argument { name: Type, name2: Type };`
+                                let arg_content;
+                                braced!(arg_content in content);
+
+                                let pairs =
+                                    Punctuated::<ReadArgument, Token![,]>::parse_terminated(
+                                        &arg_content,
+                                    )?;
+                                action.arguments.extend(pairs);
+
+                                let _: Token![;] = content.parse()?;
+                            }
                             "filter" => {
                                 let filter_content;
                                 braced!(filter_content in content);
 
-                                action.filters.push(ReadFilter {
-                                    field: filter_content.parse()?,
-                                    op: filter_content.parse()?,
-                                    value: filter_content.parse()?,
-                                });
+                                let field: Ident = filter_content.parse()?;
+                                let op: ReadFilterOperation = filter_content.parse()?;
+
+                                // # Filter Value Parsing
+                                //
+                                // If the next token is `arg`, parse `arg(name)` as a
+                                // runtime argument reference. Otherwise parse as a
+                                // literal expression.
+                                let value = if filter_content.peek(Ident) {
+                                    let fork = filter_content.fork();
+                                    let maybe_arg: Ident = fork.parse()?;
+                                    if maybe_arg == "arg" {
+                                        // Consume from the real stream
+                                        let _: Ident = filter_content.parse()?;
+                                        let paren_content;
+                                        parenthesized!(paren_content in filter_content);
+                                        let arg_name: Ident = paren_content.parse()?;
+                                        ReadFilterValue::Arg(arg_name)
+                                    } else {
+                                        ReadFilterValue::Literal(filter_content.parse()?)
+                                    }
+                                } else {
+                                    ReadFilterValue::Literal(filter_content.parse()?)
+                                };
+
+                                action.filters.push(ReadFilter { field, op, value });
 
                                 let _: Token![;] = content.parse()?;
                             }
                             got => {
                                 return Err(syn::Error::new(
                                     key.span(),
-                                    format!("Unexpected create keyword, got `{got}`"),
+                                    format!("Unexpected read keyword, got `{got}`"),
                                 ));
                             }
+                        }
+                    }
+
+                    // Validate that all `arg(name)` references in filters point
+                    // to declared arguments.
+                    for filter in &action.filters {
+                        if let ReadFilterValue::Arg(ref arg_name) = filter.value
+                            && !action.arguments.iter().any(|a| a.name == *arg_name)
+                        {
+                            return Err(syn::Error::new(
+                                arg_name.span(),
+                                format!(
+                                    "Filter references undeclared argument `{arg_name}`. \
+                                     Declare it in the `argument {{ ... }}` block."
+                                ),
+                            ));
                         }
                     }
 
@@ -1185,5 +1272,103 @@ mod tests {
 
         check!(input.resource.name.len() == 3);
         check!(input.config.list);
+    }
+
+    // -----------------------------------------------------------------------
+    // Read action argument + arg() filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_action_with_no_arguments_or_filters() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all;
+        }));
+
+        check!(action.name == "all");
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.arguments.is_empty());
+        check!(read.filters.is_empty());
+    }
+
+    #[test]
+    fn read_action_with_literal_filter_only() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read open_only {
+                filter { archived == false };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.arguments.is_empty());
+        check!(read.filters.len() == 1);
+        check!(read.filters[0].field == "archived");
+        check!(let ReadFilterValue::Literal(_) = &read.filters[0].value);
+    }
+
+    #[test]
+    fn read_action_with_arguments_and_arg_filter() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read by_status {
+                argument { status: TicketStatus };
+                filter { status == arg(status) };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.arguments.len() == 1);
+        check!(read.arguments[0].name == "status");
+        check!(read.filters.len() == 1);
+        assert!(let ReadFilterValue::Arg(arg_name) = &read.filters[0].value);
+        check!(*arg_name == "status");
+    }
+
+    #[test]
+    fn read_action_with_multiple_arguments() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read by_status_and_priority {
+                argument { status: TicketStatus, search: Option<String> };
+                filter { status == arg(status) };
+                filter { archived == false };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.arguments.len() == 2);
+        check!(read.arguments[0].name == "status");
+        check!(read.arguments[1].name == "search");
+        check!(read.filters.len() == 2);
+        check!(let ReadFilterValue::Arg(_) = &read.filters[0].value);
+        check!(let ReadFilterValue::Literal(_) = &read.filters[1].value);
+    }
+
+    #[test]
+    fn read_action_rejects_undeclared_arg_reference() {
+        let result = syn::parse2::<ResourceActionInput>(quote! {
+            read broken {
+                filter { status == arg(status) };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("undeclared argument"));
+        check!(msg.contains("status"));
+    }
+
+    #[test]
+    fn read_action_mixed_arg_and_literal_filters() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read filtered {
+                argument { priority: u32 };
+                filter { priority == arg(priority) };
+                filter { archived == false };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.filters.len() == 2);
+        assert!(let ReadFilterValue::Arg(name) = &read.filters[0].value);
+        check!(*name == "priority");
+        check!(let ReadFilterValue::Literal(_) = &read.filters[1].value);
     }
 }

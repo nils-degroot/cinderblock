@@ -164,16 +164,16 @@ where
     async fn read(&self, args: &A::Arguments) -> cinderblock_core::Result<Vec<A::Output>> {
         let mut builder = sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", R::TABLE_NAME));
 
-        if A::filter_count() > 0 {
-            builder.push("WHERE ");
-            A::bind_filters(&mut builder, args);
-        }
+        // bind_filters handles emitting the WHERE keyword internally and
+        // returns whether any conditions were added. This simplifies the
+        // caller when optional arguments may or may not produce clauses.
+        A::bind_filters(&mut builder, args);
 
         let rows = builder
             .build()
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| format!("destroy from `{}`: {e}", R::TABLE_NAME))?;
+            .map_err(|e| format!("read from `{}`: {e}", R::TABLE_NAME))?;
 
         let mut result = Vec::with_capacity(rows.len());
 

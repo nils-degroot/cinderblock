@@ -57,6 +57,17 @@ resource! {
             filter { done == false };
         }
 
+        read by_priority {
+            argument { priority: Priority };
+            filter { priority == arg(priority) };
+        }
+
+        read by_priority_and_status {
+            argument { priority: Priority, done: Option<bool> };
+            filter { priority == arg(priority) };
+            filter { done == arg(done) };
+        }
+
         create add;
 
         update complete {
@@ -379,4 +390,131 @@ async fn read_actions_with_filter_2() {
     check!(open_tasks.len() == 1);
     check!(open_tasks[0].task_id == expected.task_id);
     check!(open_tasks[0].title == expected.title);
+}
+
+// ---------------------------------------------------------------------------
+// # Runtime argument tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn read_action_with_required_argument() {
+    let (ctx, _dl) = setup().await;
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "Low priority".to_string(),
+            priority: Priority::Low,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create low-priority task");
+
+    let expected = cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "High priority".to_string(),
+            priority: Priority::High,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create high-priority task");
+
+    // Use the `by_priority` read action with a required argument
+    let results = cinderblock_core::read::<Task, ByPriority>(
+        &ctx,
+        &ByPriorityArguments {
+            priority: Priority::High,
+        },
+    )
+    .await
+    .expect("read by priority");
+
+    check!(results.len() == 1);
+    check!(results[0].task_id == expected.task_id);
+    check!(results[0].title == "High priority");
+}
+
+#[tokio::test]
+async fn read_action_with_optional_argument_some() {
+    let (ctx, _dl) = setup().await;
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "High but done".to_string(),
+            priority: Priority::High,
+            done: true,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create done high-priority task");
+
+    let expected = cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "High and open".to_string(),
+            priority: Priority::High,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create open high-priority task");
+
+    // Both arguments provided — filters on priority AND done
+    let results = cinderblock_core::read::<Task, ByPriorityAndStatus>(
+        &ctx,
+        &ByPriorityAndStatusArguments {
+            priority: Priority::High,
+            done: Some(false),
+        },
+    )
+    .await
+    .expect("read by priority and status");
+
+    check!(results.len() == 1);
+    check!(results[0].task_id == expected.task_id);
+    check!(results[0].title == "High and open");
+}
+
+#[tokio::test]
+async fn read_action_with_optional_argument_none() {
+    let (ctx, _dl) = setup().await;
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "High done".to_string(),
+            priority: Priority::High,
+            done: true,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create done high-priority task");
+
+    cinderblock_core::create::<Task, Add>(
+        AddInput {
+            title: "High open".to_string(),
+            priority: Priority::High,
+            done: false,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create open high-priority task");
+
+    // Optional `done` argument is None — only filters on priority
+    let results = cinderblock_core::read::<Task, ByPriorityAndStatus>(
+        &ctx,
+        &ByPriorityAndStatusArguments {
+            priority: Priority::High,
+            done: None,
+        },
+    )
+    .await
+    .expect("read by priority only");
+
+    check!(results.len() == 2);
 }

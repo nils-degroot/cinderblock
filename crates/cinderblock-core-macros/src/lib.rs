@@ -2,9 +2,27 @@ use core::iter::Iterator;
 use std::collections::{HashMap, HashSet};
 
 use cinderblock_extension_api::{
-    Accept, ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput, UpdateChange,
+    Accept, ReadFilterValue, ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput,
+    UpdateChange,
 };
-use syn::{Ident, spanned::Spanned};
+use syn::{spanned::Spanned, Ident, Type};
+
+/// Checks whether a `syn::Type` is `Option<T>`.
+///
+/// We inspect the outermost path segment for the identifier `Option`. This
+/// handles both `Option<T>` and `std::option::Option<T>` (by checking the
+/// last segment).
+fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Option")
+    } else {
+        false
+    }
+}
 
 #[proc_macro]
 pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -76,26 +94,88 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
+            // # Arguments struct generation
+            //
+            // When the read action declares arguments, we generate a dedicated
+            // `{ActionName}Arguments` struct with `Deserialize` so it can be
+            // populated from query parameters. When no arguments are declared,
+            // we use `()` as the arguments type.
+            let has_arguments = !read_action.arguments.is_empty();
+
+            let (arguments_type, arguments_struct) = if has_arguments {
+                let args_name = Ident::new(&format!("{action_name}Arguments"), action.name.span());
+                let arg_fields = read_action.arguments.iter().map(|arg| {
+                    let name = &arg.name;
+                    let ty = &arg.ty;
+                    quote::quote! { pub #name: #ty }
+                });
+
+                (
+                    quote::quote! { #args_name },
+                    quote::quote! {
+                        #[derive(::std::fmt::Debug, cinderblock_core::serde::Deserialize)]
+                        struct #args_name {
+                            #(#arg_fields),*
+                        }
+                    },
+                )
+            } else {
+                (quote::quote! { () }, quote::quote! {})
+            };
+
             // Setup InMemoryReadAction if no data layer is provided
             let data_layer_block = if data_layer_specified {
                 quote::quote! { }
             } else {
+                // # Filter codegen for InMemoryReadAction
+                //
+                // Each filter becomes a boolean clause AND'd together. Literal
+                // values are emitted directly; `arg(name)` references access
+                // the corresponding field on the args struct.
+                //
+                // For `Option<T>` argument types, the filter clause is
+                // conditional: when `None`, the clause is skipped (evaluates
+                // to `true`). This lets optional arguments act as "filter if
+                // provided" semantics.
                 let filters = read_action.filters.iter().map(|filter| {
                     let field = &filter.field;
-                    let value = &filter.value;
 
                     let op = match filter.op {
                         cinderblock_extension_api::ReadFilterOperation::Eq => quote::quote! { == },
                     };
 
-                    quote::quote! {
-                        row.#field #op #value &&
+                    match &filter.value {
+                        ReadFilterValue::Literal(expr) => {
+                            quote::quote! {
+                                row.#field #op #expr &&
+                            }
+                        }
+                        ReadFilterValue::Arg(arg_name) => {
+                            // Check if the argument type is Option<T> by
+                            // looking it up in the declared arguments.
+                            let arg_decl = read_action
+                                .arguments
+                                .iter()
+                                .find(|a| a.name == *arg_name)
+                                .expect("arg reference validated during parsing");
+
+                            if is_option_type(&arg_decl.ty) {
+                                // Optional arg: skip the filter when None
+                                quote::quote! {
+                                    args.#arg_name.as_ref().map_or(true, |v| row.#field #op *v) &&
+                                }
+                            } else {
+                                quote::quote! {
+                                    row.#field #op args.#arg_name &&
+                                }
+                            }
+                        }
                     }
                 });
 
                 quote::quote! {
                     impl cinderblock_core::data_layer::in_memory::InMemoryReadAction for #action_name {
-                        fn filter(row: &Self::Output) -> bool {
+                        fn filter(row: &Self::Output, args: &Self::Arguments) -> bool {
                             #(#filters)* true
                         }
                     }
@@ -103,12 +183,14 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             };
 
             quote::quote! {
+                #arguments_struct
+
                 struct #action_name;
 
                 impl cinderblock_core::ReadAction for #action_name {
                     type Output = #ident;
 
-                    type Arguments = ();
+                    type Arguments = #arguments_type;
                 }
 
                 #data_layer_block

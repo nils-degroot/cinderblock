@@ -40,7 +40,7 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
-use syn::{bracketed, parse::Parse, Ident, LitBool, Token};
+use syn::{bracketed, parse::Parse, Ident, LitBool, Token, Type};
 
 /// Extension-specific configuration parsed from inside the `config = { ... }`
 /// block.
@@ -227,6 +227,38 @@ fn input_fields_for_accept<'a>(
     }
 }
 
+/// Checks whether a `syn::Type` is `Option<T>`.
+fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "Option")
+    } else {
+        false
+    }
+}
+
+/// Extracts the inner `T` from an `Option<T>` type.
+///
+/// Returns `None` if the type is not an `Option` or doesn't have exactly one
+/// generic argument.
+fn extract_option_inner_type(ty: &Type) -> Option<&Type> {
+    if let Type::Path(type_path) = ty {
+        let last_seg = type_path.path.segments.last()?;
+        if last_seg.ident != "Option" {
+            return None;
+        }
+        if let syn::PathArguments::AngleBracketed(args) = &last_seg.arguments
+            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+        {
+            return Some(inner);
+        }
+    }
+    None
+}
+
 #[proc_macro]
 pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = syn::parse_macro_input!(item as ExtensionMacroInput<JsonApiConfig>);
@@ -275,10 +307,10 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
     // route. The action name is converted to kebab-case for the URL path
     // segment and to PascalCase to reference the generated marker struct.
     let read_routes = resource.actions.iter().filter_map(|action| {
-        match &action.kind {
-            ResourceActionInputKind::Read(_) => {}
+        let action_read = match &action.kind {
+            ResourceActionInputKind::Read(action_read) => action_read,
             _ => return None,
-        }
+        };
 
         let action_name_str = action.name.to_string();
         if !config.should_read(&action_name_str) {
@@ -291,6 +323,90 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         let action_type_name = convert_case::ccase!(pascal, &action_name_str);
         let action_type = Ident::new(&action_type_name, action.name.span());
 
+        let has_arguments = !action_read.arguments.is_empty();
+
+        // # Handler generation
+        //
+        // When the read action has arguments, we use axum's `Query<ArgsType>`
+        // extractor to parse query parameters from the URL. When there are
+        // no arguments, we pass `&()` directly.
+        let handler = if has_arguments {
+            let args_type = Ident::new(&format!("{action_type_name}Arguments"), action.name.span());
+            quote::quote! {
+                move |
+                    cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
+                | {
+                    let ctx = ctx.clone();
+                    async move {
+                        cinderblock_json_api::tracing::info!(
+                            resource = stringify!(#ident),
+                            action = #action_name_str,
+                            "handling read request"
+                        );
+
+                        match cinderblock_core::read::<#ident, #action_type>(&ctx, &args).await {
+                            Ok(results) => (
+                                cinderblock_json_api::axum::http::StatusCode::OK,
+                                cinderblock_json_api::axum::Json(
+                                    cinderblock_json_api::Response { data: results },
+                                ),
+                            )
+                                .into_response(),
+                            Err(err) => {
+                                cinderblock_json_api::tracing::error!(
+                                    resource = stringify!(#ident),
+                                    action = #action_name_str,
+                                    error = %err,
+                                    "read request failed"
+                                );
+                                (
+                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    err.to_string(),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            quote::quote! {
+                move || {
+                    let ctx = ctx.clone();
+                    async move {
+                        cinderblock_json_api::tracing::info!(
+                            resource = stringify!(#ident),
+                            action = #action_name_str,
+                            "handling read request"
+                        );
+
+                        match cinderblock_core::read::<#ident, #action_type>(&ctx, &()).await {
+                            Ok(results) => (
+                                cinderblock_json_api::axum::http::StatusCode::OK,
+                                cinderblock_json_api::axum::Json(
+                                    cinderblock_json_api::Response { data: results },
+                                ),
+                            )
+                                .into_response(),
+                            Err(err) => {
+                                cinderblock_json_api::tracing::error!(
+                                    resource = stringify!(#ident),
+                                    action = #action_name_str,
+                                    error = %err,
+                                    "read request failed"
+                                );
+                                (
+                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    err.to_string(),
+                                )
+                                    .into_response()
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
         Some(quote::quote! {
             {
                 let ctx = ctx.clone();
@@ -302,39 +418,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 );
                 router = router.route(
                     #route_path,
-                    cinderblock_json_api::axum::routing::get(move || {
-                        let ctx = ctx.clone();
-                        async move {
-                            cinderblock_json_api::tracing::info!(
-                                resource = stringify!(#ident),
-                                action = #action_name_str,
-                                "handling read request"
-                            );
-
-                            match cinderblock_core::read::<#ident, #action_type>(&ctx, &()).await {
-                                Ok(results) => (
-                                    cinderblock_json_api::axum::http::StatusCode::OK,
-                                    cinderblock_json_api::axum::Json(
-                                        cinderblock_json_api::Response { data: results },
-                                    ),
-                                )
-                                    .into_response(),
-                                Err(err) => {
-                                    cinderblock_json_api::tracing::error!(
-                                        resource = stringify!(#ident),
-                                        action = #action_name_str,
-                                        error = %err,
-                                        "read request failed"
-                                    );
-                                    (
-                                        cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                        err.to_string(),
-                                    )
-                                        .into_response()
-                                }
-                            }
-                        }
-                    }),
+                    cinderblock_json_api::axum::routing::get(#handler),
                 );
             }
         })
@@ -776,14 +860,18 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         //
         // GET /resource/action-name → returns filtered resources as
         // `Response<Vec<Resource>>`
+        //
+        // When the read action declares arguments, we add OpenAPI query
+        // parameter definitions for each argument. Optional arguments
+        // (those with `Option<T>` types) are marked as not required.
         let read_path_items: Vec<_> = resource
             .actions
             .iter()
             .filter_map(|action| {
-                match &action.kind {
-                    ResourceActionInputKind::Read(_) => {}
+                let action_read = match &action.kind {
+                    ResourceActionInputKind::Read(action_read) => action_read,
                     _ => return None,
-                }
+                };
 
                 let action_name_str = action.name.to_string();
                 if !config.should_read(&action_name_str) {
@@ -794,6 +882,39 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 let route_path = format!("{}/{}", base_path, action_path_name);
                 let operation_id = format!("read-{}-{}", ident_kebab, action_path_name);
 
+                // Generate query parameter definitions for each declared
+                // argument. For `Option<T>` types, extract the inner `T`
+                // for the schema and mark as not required.
+                let query_params: Vec<_> = action_read.arguments.iter().map(|arg| {
+                    let arg_name_str = arg.name.to_string();
+                    let arg_name_kebab = convert_case::ccase!(kebab, &arg_name_str);
+                    let is_optional = is_option_type(&arg.ty);
+
+                    let schema_type = if is_optional {
+                        // Extract inner T from Option<T>
+                        extract_option_inner_type(&arg.ty).unwrap_or(&arg.ty)
+                    } else {
+                        &arg.ty
+                    };
+
+                    let required_value = if is_optional {
+                        quote::quote! { cinderblock_json_api::utoipa::openapi::Required::False }
+                    } else {
+                        quote::quote! { cinderblock_json_api::utoipa::openapi::Required::True }
+                    };
+
+                    quote::quote! {
+                        .parameter(
+                            cinderblock_json_api::utoipa::openapi::path::ParameterBuilder::new()
+                                .name(#arg_name_kebab)
+                                .parameter_in(cinderblock_json_api::utoipa::openapi::path::ParameterIn::Query)
+                                .required(#required_value)
+                                .schema(Some(<#schema_type as cinderblock_json_api::FieldSchema>::field_schema()))
+                                .build(),
+                        )
+                    }
+                }).collect();
+
                 Some(quote::quote! {
                     .path(
                         #route_path,
@@ -803,6 +924,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 .operation_id(Some(#operation_id))
                                 .tag(#ident_str)
                                 .summary(Some(format!("Read {} via {}", #ident_str, #action_name_str)))
+                                #(#query_params)*
                                 .response(
                                     "200",
                                     cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
