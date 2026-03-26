@@ -46,7 +46,13 @@ resource! {
     }
 
     extensions {
-        cinderblock_json_api {};
+        cinderblock_json_api {
+            route = { method = GET; path = "/"; action = all; };
+            route = { method = POST; path = "/"; action = open; };
+            route = { method = POST; path = "/assign"; action = assign; };
+            route = { method = PATCH; path = "/{primary_key}"; action = close; };
+            route = { method = DELETE; path = "/{primary_key}"; action = remove; };
+        };
     }
 }
 
@@ -103,15 +109,18 @@ async fn main() -> cinderblock_core::Result<()> {
     println!("Listening on http://0.0.0.0:3000");
     println!();
     println!("Try:");
-    println!("  curl http://localhost:3000/helpdesk/support/ticket/all");
-    println!("  curl http://localhost:3000/helpdesk/support/ticket/open-tickets");
+    println!("  curl http://localhost:3000/helpdesk/support/ticket/");
+    println!("  curl http://localhost:3000/helpdesk/support/ticket/?status=Open");
     println!(
-        "  curl -X POST http://localhost:3000/helpdesk/support/ticket/open -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'"
+        "  curl -X POST http://localhost:3000/helpdesk/support/ticket/ -H 'Content-Type: application/json' -d '{{\"subject\": \"New ticket\", \"status\": \"Open\"}}'"
+    );
+    println!(
+        "  curl -X POST http://localhost:3000/helpdesk/support/ticket/assign -H 'Content-Type: application/json' -d '{{\"subject\": \"Assigned ticket\"}}'"
     );
     println!(
         "  curl -X PATCH http://localhost:3000/helpdesk/support/ticket/<id>/close -H 'Content-Type: application/json' -d '{{}}'"
     );
-    println!("  curl -X DELETE http://localhost:3000/helpdesk/support/ticket/<id>/remove");
+    println!("  curl -X DELETE http://localhost:3000/helpdesk/support/ticket/<id>");
     println!();
     println!("OpenAPI spec:");
     println!("  curl http://localhost:3000/openapi.json");
