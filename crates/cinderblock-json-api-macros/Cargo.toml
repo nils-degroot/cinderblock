@@ -1,13 +1,19 @@
 [package]
 name = "cinderblock-json-api-macros"
-version = "0.1.0"
+description = "Proc macro generating Axum route handlers, endpoint registration, and OpenAPI schemas for cinderblock resources"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 proc-macro = true
 
 [dependencies]
-cinderblock-extension-api = { path = "../cinderblock-extension-api" }
+cinderblock-extension-api = { version = "0.1.0", path = "../cinderblock-extension-api" }
 convert_case = "0.11.0"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"

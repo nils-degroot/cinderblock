@@ -1,18 +1,162 @@
-// # Cinderblock JSON API Extension
-//
-// Provides a JSON REST API extension for Cinderblock resources. When a resource
-// declares `cinderblock_json_api` in its `extensions { ... }` block, the `resource!`
-// macro generates route registration code that automatically registers
-// endpoints via `inventory`.
-//
-// Usage in application code:
-//
-// ```rust
-// let ctx = cinderblock_core::Context::new("my_app").await?;
-// let router = cinderblock_json_api::router(ctx);
-// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-// axum::serve(listener, router).await?;
-// ```
+//! JSON REST API extension for cinderblock resources.
+//!
+//! When a resource declares `cinderblock_json_api` in its `extensions { ... }`
+//! block, the [`resource!`](cinderblock_core::resource) macro generates Axum
+//! route handlers and endpoint registration code. At startup, all registered
+//! endpoints are automatically discovered via [`inventory`] and assembled into
+//! an [`axum::Router`].
+//!
+//! # Extension configuration
+//!
+//! Inside the `extensions` block of a [`resource!`](cinderblock_core::resource)
+//! invocation, declare routes and optional settings:
+//!
+//! ```rust,ignore
+//! extensions {
+//!     cinderblock_json_api {
+//!         // Each `route` maps an HTTP method + path to a resource action.
+//!         route = { method = GET;    path = "/";              action = all;    };
+//!         route = { method = POST;   path = "/";              action = open;   };
+//!         route = { method = POST;   path = "/assign";        action = assign; };
+//!         route = { method = PATCH;  path = "/{primary_key}"; action = close;  };
+//!         route = { method = DELETE; path = "/{primary_key}"; action = remove; };
+//!
+//!         // Optional: override the auto-derived base path.
+//!         // Default: kebab-case of resource name segments joined by `/`.
+//!         //   e.g. `Helpdesk.Support.Ticket` -> `/helpdesk/support/ticket`
+//!         // base_path = "/api/v1/tickets";
+//!
+//!         // Optional: disable OpenAPI spec generation. Default: true.
+//!         // openapi = false;
+//!     };
+//! }
+//! ```
+//!
+//! ## Route configuration
+//!
+//! | Field | Required | Description |
+//! |---|---|---|
+//! | `method` | yes | HTTP method: `GET`, `POST`, `PATCH`, `PUT`, or `DELETE` |
+//! | `path` | yes | Path relative to the base path. Use `/{primary_key}` for routes that operate on a single resource. |
+//! | `action` | yes | Name of a declared action on the resource. Must match the action kind (e.g. `GET` for `read`, `POST` for `create`). |
+//!
+//! The action name must refer to an action declared in the resource's `actions`
+//! block. Duplicate method + path combinations are rejected at compile time.
+//!
+//! ## Route behavior by action kind
+//!
+//! - **Read** (`GET`): query parameters are deserialized into the action's
+//!   `Arguments` struct. Returns `{ "data": [...] }`.
+//! - **Create** (`POST`): JSON body is deserialized into the action's `Input`
+//!   struct. Returns `{ "data": <resource> }`.
+//! - **Update** (`PATCH`/`PUT`): primary key is extracted from the URL path,
+//!   JSON body is deserialized into the action's `Input` struct. Returns
+//!   `{ "data": <resource> }`.
+//! - **Destroy** (`DELETE`): primary key is extracted from the URL path.
+//!   Returns `{ "data": <resource> }` with the deleted resource.
+//!
+//! All responses are wrapped in a [`Response`] envelope (`{ "data": ... }`).
+//!
+//! ## OpenAPI and Swagger UI
+//!
+//! By default, the extension generates an OpenAPI spec fragment for each
+//! resource. These fragments are merged and served at `GET /openapi.json`.
+//!
+//! When the `swagger-ui` feature is enabled, a Swagger UI is mounted at
+//! `/swagger-ui`. This can be toggled off via [`RouterConfig::swagger_ui`].
+//!
+//! ## Custom types in OpenAPI schemas
+//!
+//! The generated OpenAPI schemas use the [`FieldSchema`] trait to produce
+//! schemas for each attribute type. Built-in types (`String`, integers, `bool`,
+//! `Uuid`) have implementations provided. For custom types (like enums),
+//! derive [`utoipa::ToSchema`] and bridge it with [`impl_field_schema!`]:
+//!
+//! ```rust,ignore
+//! #[derive(Debug, Clone, Serialize, Deserialize, cinderblock_json_api::utoipa::ToSchema)]
+//! enum TicketStatus {
+//!     Open,
+//!     Closed,
+//! }
+//!
+//! cinderblock_json_api::impl_field_schema!(TicketStatus);
+//! ```
+//!
+//! # Building the router
+//!
+//! Use [`router()`] for the common case, or [`RouterConfig`] for more control:
+//!
+//! ```rust,ignore
+//! let ctx = cinderblock_core::Context::new();
+//!
+//! // Simple — all defaults.
+//! let app = cinderblock_json_api::router(ctx);
+//!
+//! // Or configure options like Swagger UI.
+//! let app = cinderblock_json_api::RouterConfig::new(ctx)
+//!     .swagger_ui(false)
+//!     .build();
+//!
+//! let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+//! axum::serve(listener, app).await?;
+//! ```
+//!
+//! # Full example
+//!
+//! ```rust,ignore
+//! use cinderblock_core::{Context, resource, serde::{Deserialize, Serialize}};
+//! use uuid::Uuid;
+//!
+//! resource! {
+//!     name = Helpdesk.Support.Ticket;
+//!
+//!     attributes {
+//!         ticket_id Uuid {
+//!             primary_key true;
+//!             writable false;
+//!             default || Uuid::new_v4();
+//!         }
+//!         subject String;
+//!         status TicketStatus;
+//!     }
+//!
+//!     actions {
+//!         read all {
+//!             argument { status: Option<TicketStatus> };
+//!             filter { status == arg(status) };
+//!         };
+//!         create open;
+//!         update close {
+//!             accept [];
+//!             change_ref |ticket| { ticket.status = TicketStatus::Closed; };
+//!         };
+//!         destroy remove;
+//!     }
+//!
+//!     extensions {
+//!         cinderblock_json_api {
+//!             route = { method = GET;    path = "/";              action = all;    };
+//!             route = { method = POST;   path = "/";              action = open;   };
+//!             route = { method = PATCH;  path = "/{primary_key}"; action = close;  };
+//!             route = { method = DELETE; path = "/{primary_key}"; action = remove; };
+//!         };
+//!     }
+//! }
+//!
+//! #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq,
+//!          cinderblock_json_api::utoipa::ToSchema)]
+//! enum TicketStatus { #[default] Open, Closed }
+//! cinderblock_json_api::impl_field_schema!(TicketStatus);
+//!
+//! #[tokio::main]
+//! async fn main() -> cinderblock_core::Result<()> {
+//!     let ctx = Context::new();
+//!     let router = cinderblock_json_api::router(ctx);
+//!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+//!     axum::serve(listener, router).await?;
+//!     Ok(())
+//! }
+//! ```
 
 use std::sync::Arc;
 

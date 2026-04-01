@@ -1,7 +1,13 @@
 [package]
 name = "cinderblock-sqlx-macros"
-version = "0.1.0"
+description = "Proc macro generating SqlResource trait impls with SQL bind/decode methods for cinderblock resources"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 proc-macro = true

@@ -1,11 +1,17 @@
 [package]
 name = "cinderblock-json-api"
-version = "0.1.0"
+description = "JSON REST API extension for cinderblock with Axum router, auto-registered endpoints, and OpenAPI support"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-cinderblock-core = { path = "../cinderblock-core" }
-cinderblock-json-api-macros = { path = "../cinderblock-json-api-macros" }
+cinderblock-core = { version = "0.1.0", path = "../cinderblock-core" }
+cinderblock-json-api-macros = { version = "0.1.0", path = "../cinderblock-json-api-macros" }
 axum = "0.8"
 inventory = "0.3"
 serde = { version = "1", features = ["derive"] }

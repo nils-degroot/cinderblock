@@ -1,24 +1,98 @@
-// # Cinderblock SQLx Extension
-//
-// Data layer extension that stores resources in SQL databases via `sqlx`.
-// Currently supports SQLite with one column per resource attribute.
-//
-// The extension follows the same pattern as `cinderblock-json-api`:
-//   1. User declares `cinderblock_sqlx { table = "tickets"; }` in their resource's
-//      `extensions` block
-//   2. `resource!` forwards the raw tokens to `cinderblock_sqlx::__resource_extension!`
-//   3. The proc macro generates a `SqlResource` impl for the resource
-//   4. At runtime, `SqliteDataLayer` uses `SqlResource` to build and
-//      execute SQL queries
-//
-// # Type mapping philosophy
-//
-// We deliberately do NOT define our own type-mapping trait. Instead, we
-// rely on sqlx's existing `Type`, `Encode`, and `Decode` implementations.
-// The generated `SqlResource` methods use `QueryBuilder::push_bind()` (which
-// requires `Encode + Type`) and `Row::try_get()` (which requires `Decode +
-// Type`). For custom types like enums, the user implements sqlx's traits
-// directly — or uses `#[sqlx(type_name = "...")]` / serde-based approaches.
+//! SQLite persistence extension for cinderblock resources using
+//! [SQLx](https://crates.io/crates/sqlx).
+//!
+//! When a resource declares `cinderblock_sqlx` in its `extensions { ... }`
+//! block, the [`resource!`](cinderblock_core::resource) macro generates a
+//! [`SqlResource`] trait impl that provides table metadata, column bind
+//! methods, and row decoding. At runtime,
+//! [`SqliteDataLayer`](sqlite::SqliteDataLayer) uses these generated methods
+//! to build and execute SQL queries.
+//!
+//! # Extension configuration
+//!
+//! Inside the `extensions` block of a [`resource!`](cinderblock_core::resource)
+//! invocation:
+//!
+//! ```rust,ignore
+//! extensions {
+//!     cinderblock_sqlx {
+//!         // Required: the SQL table name to store this resource in.
+//!         table = "tickets";
+//!     };
+//! }
+//! ```
+//!
+//! The only configuration is the `table` name. Column names are derived
+//! automatically from attribute names using `snake_case`.
+//!
+//! # Type mapping
+//!
+//! This extension deliberately does **not** define its own type-mapping trait.
+//! Instead, it relies on SQLx's existing [`sqlx::Type`], [`sqlx::Encode`], and
+//! [`sqlx::Decode`] implementations. The generated [`SqlResource`] methods use
+//! `QueryBuilder::push_bind()` (which requires `Encode + Type`) and
+//! `Row::try_get()` (which requires `Decode + Type`).
+//!
+//! For custom types like enums, implement SQLx's traits directly — for
+//! example via `#[derive(sqlx::Type)]` or a serde-based approach.
+//!
+//! # Read filters
+//!
+//! Read actions with `filter` clauses in the `resource!` DSL generate a
+//! [`SqlReadAction`] impl. The generated `bind_filters` method dynamically
+//! builds `WHERE` clauses:
+//!
+//! - **Literal filters** (`filter { status == TicketStatus::Open }`) always
+//!   emit a `WHERE column = ?` clause.
+//! - **Argument-bound filters** (`filter { status == arg(status) }`) bind the
+//!   runtime argument value. When the argument type is `Option<T>` and the
+//!   value is `None`, the clause is omitted entirely.
+//!
+//! # Setup
+//!
+//! Register a [`SqliteDataLayer`](sqlite::SqliteDataLayer) on the
+//! [`Context`](cinderblock_core::Context) so resources can use it:
+//!
+//! ```rust,ignore
+//! use cinderblock_core::Context;
+//! use cinderblock_sqlx::sqlite::SqliteDataLayer;
+//!
+//! let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+//! let mut ctx = Context::new();
+//! ctx.register_data_layer(SqliteDataLayer::new(pool));
+//! ```
+//!
+//! Then set the resource's data layer in the `resource!` DSL:
+//!
+//! ```rust,ignore
+//! resource! {
+//!     name = Helpdesk.Support.Ticket;
+//!     data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+//!
+//!     attributes {
+//!         ticket_id Uuid {
+//!             primary_key true;
+//!             writable false;
+//!             default || Uuid::new_v4();
+//!         }
+//!         subject String;
+//!         status String;
+//!     }
+//!
+//!     actions {
+//!         read all;
+//!         create open;
+//!         update edit;
+//!         destroy remove;
+//!     }
+//!
+//!     extensions {
+//!         cinderblock_sqlx {
+//!             table = "tickets";
+//!         };
+//!     }
+//! }
+//! ```
 
 use cinderblock_core::ReadAction;
 pub use cinderblock_sqlx_macros::__resource_extension;

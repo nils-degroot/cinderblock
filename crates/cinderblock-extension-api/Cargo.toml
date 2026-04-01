@@ -1,7 +1,13 @@
 [package]
 name = "cinderblock-extension-api"
-version = "0.1.0"
+description = "Shared DSL parser types and syn::Parse implementations for the cinderblock resource! macro and extensions"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 convert_case = "0.11.0"

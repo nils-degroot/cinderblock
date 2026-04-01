@@ -9,4 +9,10 @@ members = [
 ]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/nils-degroot/cinderblock"
+readme = "README.md"
+keywords = ["framework", "crud", "resource", "declarative", "code-generation"]
+categories = ["web-programming"]

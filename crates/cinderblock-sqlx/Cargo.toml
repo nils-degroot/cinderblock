@@ -1,7 +1,13 @@
 [package]
 name = "cinderblock-sqlx"
-version = "0.1.0"
+description = "SQLite persistence layer for cinderblock using SQLx with generated query building and dynamic filters"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 cinderblock-core = { version = "0.1.0", path = "../cinderblock-core" }

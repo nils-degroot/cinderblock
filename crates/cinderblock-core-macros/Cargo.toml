@@ -1,7 +1,13 @@
 [package]
 name = "cinderblock-core-macros"
-version = "0.1.0"
+description = "Proc macro implementing the cinderblock resource! macro for generating structs and CRUD trait impls"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 proc-macro = true
