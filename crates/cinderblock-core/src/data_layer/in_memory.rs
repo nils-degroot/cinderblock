@@ -19,6 +19,25 @@ impl InMemoryDataLayer {
     pub(crate) fn new() -> Self {
         Self {}
     }
+
+    /// Load all rows of a given resource type from the global in-memory
+    /// store.
+    ///
+    /// This is used by generated relation-loading code to batch-fetch
+    /// related resources. Returns an empty `Vec` if no rows of the
+    /// requested type exist.
+    pub async fn load_all<R: Resource + 'static>(&self) -> Vec<R> {
+        let state = STATE.clone();
+        let state = state.read().await;
+
+        state
+            .get(&TypeId::of::<R>())
+            .into_iter()
+            .flat_map(|map| map.values())
+            .filter_map(|boxed| boxed.downcast_ref::<R>())
+            .cloned()
+            .collect()
+    }
 }
 
 impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {

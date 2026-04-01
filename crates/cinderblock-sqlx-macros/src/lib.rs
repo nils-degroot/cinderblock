@@ -70,7 +70,7 @@
 // }
 // ```
 
-use cinderblock_extension_api::{ExtensionMacroInput, ReadFilterValue};
+use cinderblock_extension_api::{ExtensionMacroInput, ReadFilterValue, RelationDecl, RelationKind};
 use syn::{parse::Parse, Ident, LitStr, Type};
 
 /// Checks whether a `syn::Type` is `Option<T>`.
@@ -242,6 +242,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         .map(|c| quote::quote! { #c })
         .collect();
 
+    let relations = &input.resource.relations;
+
     let read_actions = input
         .resource
         .actions
@@ -256,6 +258,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             // TODO: This should come from the parsing crate
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
+
+            let has_loads = !action_read.load.is_empty();
 
             // # SQL filter generation
             //
@@ -320,42 +324,317 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             // whether the action is paged. The filter body is identical
             // for both; only the trait name differs.
             let is_paged = action_read.paged.is_some();
-            let trait_path = if is_paged {
-                quote::quote! { cinderblock_sqlx::SqlPagedReadAction }
-            } else {
-                quote::quote! { cinderblock_sqlx::SqlReadAction }
-            };
 
-            // Generate `SqlPerformRead` that delegates to the appropriate
-            // standalone execute function.
-            let perform_read_body = if is_paged {
-                quote::quote! {
-                    cinderblock_sqlx::execute_sql_paged_read::<Self>(pool, args).await
-                }
-            } else {
-                quote::quote! {
-                    cinderblock_sqlx::execute_sql_read::<Self>(pool, args).await
-                }
-            };
+            if has_loads {
+                // # Relation-loading SqlPerformRead codegen
+                //
+                // For read actions with `load [...]`, we skip the normal
+                // SqlReadAction/SqlPagedReadAction trait impls and instead
+                // generate a direct `SqlPerformRead` that:
+                //   1. Runs the base SELECT query with filters
+                //   2. For each loaded relation, runs a batched SELECT
+                //      using `WHERE column IN (?, ?, ...)` to load related
+                //      rows in a single query (N+1 safe)
+                //   3. Assembles the response wrapper structs
+                //
+                // TODO: support paged + load combination
+                let loaded_relations: Vec<&RelationDecl> = action_read
+                    .load
+                    .iter()
+                    .map(|name| {
+                        relations
+                            .iter()
+                            .find(|r| r.name == *name)
+                            .expect("load reference validated during parsing")
+                    })
+                    .collect();
 
-            quote::quote! {
-                impl #trait_path for #action_name {
-                    fn bind_filters(
-                        builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
-                        args: &Self::Arguments,
-                    ) -> bool {
-                        let mut filter_count: u32 = 0;
-                        #(#filter_stmts)*
-                        filter_count > 0
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+
+                // # Relation loading queries
+                //
+                // For each relation, generate code that:
+                //   - Collects the lookup keys from base rows (as their actual
+                //     Rust type, NOT as String — this matters because sqlx encodes
+                //     types like `Uuid` as BLOBs, not TEXT)
+                //   - Builds a `SELECT * FROM related_table WHERE col IN (?, ...)`
+                //   - Decodes rows and builds a lookup HashMap (keyed by String
+                //     for convenience, since HashMap lookup only needs equality)
+                let relation_loads = loaded_relations.iter().map(|rel| {
+                    let rel_ty = &rel.ty;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            // For belongs_to: the FK is on the base resource,
+                            // pointing to the related resource's PK. We collect
+                            // FK values from base rows, then query the related
+                            // table with `WHERE pk_column IN (...)`.
+                            //
+                            // We bind the FK values using their actual Rust type
+                            // (looked up from the resource's attribute list) so
+                            // that sqlx encodes them correctly (e.g. Uuid → BLOB).
+                            let fk_attr = resource
+                                .attributes
+                                .iter()
+                                .find(|a| a.name == *source_attr)
+                                .expect("source_attribute must reference a declared attribute");
+                            let fk_type = &fk_attr.ty;
+
+                            quote::quote! {
+                                let #map_name: ::std::collections::HashMap<String, #rel_ty> = {
+                                    // Collect unique FK values as their native type
+                                    let fk_values: Vec<#fk_type> = base_rows
+                                        .iter()
+                                        .map(|r| r.#source_attr.clone())
+                                        .collect::<::std::collections::HashSet<_>>()
+                                        .into_iter()
+                                        .collect();
+
+                                    if fk_values.is_empty() {
+                                        ::std::collections::HashMap::new()
+                                    } else {
+                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
+                                        let related_pk_col = <#rel_ty as cinderblock_sqlx::SqlResource>::PRIMARY_KEY_COLUMN;
+
+                                        let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
+                                            format!("SELECT * FROM {} WHERE {} IN (", related_table, related_pk_col)
+                                        );
+
+                                        let mut sep = builder.separated(", ");
+                                        for val in &fk_values {
+                                            sep.push_bind(val.clone());
+                                        }
+                                        builder.push(")");
+
+                                        let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                            .build()
+                                            .fetch_all(pool)
+                                            .await
+                                            .map_err(|e| -> Box<dyn ::std::error::Error + Send + Sync> {
+                                                format!(
+                                                    "load belongs_to relation from `{}`: {e}",
+                                                    related_table,
+                                                ).into()
+                                            })?;
+
+                                        let mut map = ::std::collections::HashMap::with_capacity(rows.len());
+                                        for row in &rows {
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)?;
+                                            use cinderblock_core::Resource;
+                                            map.insert(related.primary_key().to_string(), related);
+                                        }
+                                        map
+                                    }
+                                };
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            // For has_many: the FK is on the related resource,
+                            // pointing back to the base resource's PK. We collect
+                            // PK values from base rows, then query the related
+                            // table with `WHERE fk_column IN (...)`.
+                            //
+                            // We bind the PK values using their actual Rust type
+                            // so that sqlx encodes them correctly.
+                            let source_attr_str = source_attr.to_string();
+                            let pk_type = &primary_key_attr.ty;
+
+                            quote::quote! {
+                                let #map_name: ::std::collections::HashMap<String, Vec<#rel_ty>> = {
+                                    // Collect unique PK values as their native type
+                                    let pk_values: Vec<#pk_type> = base_rows
+                                        .iter()
+                                        .map(|r| {
+                                            use cinderblock_core::Resource;
+                                            r.primary_key().clone()
+                                        })
+                                        .collect::<::std::collections::HashSet<_>>()
+                                        .into_iter()
+                                        .collect();
+
+                                    if pk_values.is_empty() {
+                                        ::std::collections::HashMap::new()
+                                    } else {
+                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
+
+                                        let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
+                                            format!("SELECT * FROM {} WHERE {} IN (", related_table, #source_attr_str)
+                                        );
+
+                                        let mut sep = builder.separated(", ");
+                                        for val in &pk_values {
+                                            sep.push_bind(val.clone());
+                                        }
+                                        builder.push(")");
+
+                                        let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                            .build()
+                                            .fetch_all(pool)
+                                            .await
+                                            .map_err(|e| -> Box<dyn ::std::error::Error + Send + Sync> {
+                                                format!(
+                                                    "load has_many relation from `{}`: {e}",
+                                                    related_table,
+                                                ).into()
+                                            })?;
+
+                                        let mut map: ::std::collections::HashMap<String, Vec<#rel_ty>> =
+                                            ::std::collections::HashMap::new();
+                                        for row in &rows {
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)?;
+                                            let key = related.#source_attr.to_string();
+                                            map.entry(key).or_default().push(related);
+                                        }
+                                        map
+                                    }
+                                };
+                            }
+                        }
+                    }
+                });
+
+                // # Wrapper assembly for each base row
+                let relation_field_inits = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            let rel_ty = &rel.ty;
+                            let rel_name_str = rel.name.to_string();
+                            quote::quote! {
+                                #rel_name: #map_name
+                                    .get(&row.#source_attr.to_string())
+                                    .cloned()
+                                    .ok_or_else(|| -> Box<dyn ::std::error::Error + Send + Sync> {
+                                        format!(
+                                            "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                            #rel_name_str,
+                                            ::std::any::type_name::<#rel_ty>(),
+                                            row.#source_attr,
+                                        ).into()
+                                    })?
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            quote::quote! {
+                                #rel_name: {
+                                    use cinderblock_core::Resource;
+                                    #map_name
+                                        .get(&row.primary_key().to_string())
+                                        .cloned()
+                                        .unwrap_or_default()
+                                }
+                            }
+                        }
+                    }
+                });
+
+                quote::quote! {
+                    impl cinderblock_sqlx::SqlPerformRead for #action_name {
+                        async fn execute(
+                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            args: &Self::Arguments,
+                        ) -> cinderblock_core::Result<Self::Response> {
+                            use cinderblock_sqlx::sqlx::Row;
+
+                            // Step 1: Run the base query with filters
+                            let base_rows: Vec<#ident> = {
+                                let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(format!(
+                                    "SELECT * FROM {} ",
+                                    <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                ));
+
+                                let mut filter_count: u32 = 0;
+                                #(#filter_stmts)*
+                                let _ = filter_count; // suppress unused warning when no filters
+
+                                let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                    .build()
+                                    .fetch_all(pool)
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "read from `{}`: {e}",
+                                            <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                        )
+                                    })?;
+
+                                let mut result = Vec::with_capacity(rows.len());
+                                for row in &rows {
+                                    result.push(<#ident as cinderblock_sqlx::SqlResource>::from_row(row)?);
+                                }
+                                result
+                            };
+
+                            // Step 2: Load related resources via batched queries
+                            #(#relation_loads)*
+
+                            // Step 3: Assemble response wrappers
+                            let results: cinderblock_core::Result<Vec<#wrapper_name>> = base_rows
+                                .into_iter()
+                                .map(|row| -> cinderblock_core::Result<#wrapper_name> {
+                                    Ok(#wrapper_name {
+                                        #(#relation_field_inits,)*
+                                        base: row,
+                                    })
+                                })
+                                .collect();
+
+                            results
+                        }
                     }
                 }
+            } else {
+                // # Standard read action codegen (no relation loading)
 
-                impl cinderblock_sqlx::SqlPerformRead for #action_name {
-                    async fn execute(
-                        pool: &cinderblock_sqlx::sqlx::SqlitePool,
-                        args: &Self::Arguments,
-                    ) -> cinderblock_core::Result<Self::Response> {
-                        #perform_read_body
+                let trait_path = if is_paged {
+                    quote::quote! { cinderblock_sqlx::SqlPagedReadAction }
+                } else {
+                    quote::quote! { cinderblock_sqlx::SqlReadAction }
+                };
+
+                // Generate `SqlPerformRead` that delegates to the appropriate
+                // standalone execute function.
+                let perform_read_body = if is_paged {
+                    quote::quote! {
+                        cinderblock_sqlx::execute_sql_paged_read::<Self>(pool, args).await
+                    }
+                } else {
+                    quote::quote! {
+                        cinderblock_sqlx::execute_sql_read::<Self>(pool, args).await
+                    }
+                };
+
+                quote::quote! {
+                    impl #trait_path for #action_name {
+                        fn bind_filters(
+                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
+                            args: &Self::Arguments,
+                        ) -> bool {
+                            let mut filter_count: u32 = 0;
+                            #(#filter_stmts)*
+                            filter_count > 0
+                        }
+                    }
+
+                    impl cinderblock_sqlx::SqlPerformRead for #action_name {
+                        async fn execute(
+                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            args: &Self::Arguments,
+                        ) -> cinderblock_core::Result<Self::Response> {
+                            #perform_read_body
+                        }
                     }
                 }
             }

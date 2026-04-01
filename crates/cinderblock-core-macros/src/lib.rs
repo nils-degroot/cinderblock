@@ -2,8 +2,8 @@ use core::iter::Iterator;
 use std::collections::{HashMap, HashSet};
 
 use cinderblock_extension_api::{
-    Accept, ReadFilterValue, ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput,
-    UpdateChange,
+    Accept, ReadFilterValue, RelationDecl, RelationKind, ResourceActionInputKind,
+    ResourceAttributeInput, ResourceMacroInput, UpdateChange,
 };
 use syn::{spanned::Spanned, Ident, Type};
 
@@ -89,12 +89,15 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let data_layer_specified = input.data_layer.is_some();
 
+    let relations = &input.relations;
+
     let actions = input.actions.iter().map(|action| match &action.kind {
         ResourceActionInputKind::Read(read_action) => {
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
             let is_paged = read_action.paged.is_some();
+            let has_loads = !read_action.load.is_empty();
 
             // # Arguments struct generation
             //
@@ -179,35 +182,78 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 quote::quote! {}
             };
 
+            // # Response wrapper struct generation
+            //
+            // When a read action declares `load [...]`, we generate a
+            // response wrapper struct that flattens the base resource and
+            // adds a field for each loaded relation. The wrapper is used as
+            // the `Response` element type instead of the raw resource.
+            //
+            // For `belongs_to`, the field type is the related resource.
+            // For `has_many`, the field type is `Vec<RelatedResource>`.
+            let loaded_relations: Vec<&RelationDecl> = read_action
+                .load
+                .iter()
+                .map(|name| {
+                    relations
+                        .iter()
+                        .find(|r| r.name == *name)
+                        .expect("load reference validated during parsing")
+                })
+                .collect();
+
+            let response_wrapper = if has_loads {
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+
+                let relation_fields = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let rel_ty = &rel.ty;
+                    match rel.kind {
+                        RelationKind::BelongsTo => quote::quote! {
+                            pub #rel_name: #rel_ty
+                        },
+                        RelationKind::HasMany => quote::quote! {
+                            pub #rel_name: Vec<#rel_ty>
+                        },
+                    }
+                });
+
+                quote::quote! {
+                    #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize)]
+                    struct #wrapper_name {
+                        #[serde(flatten)]
+                        pub base: #ident,
+                        #(#relation_fields),*
+                    }
+                }
+            } else {
+                quote::quote! {}
+            };
+
             // # Response type
             //
-            // Non-paged actions return `Vec<Output>`, paged actions return
-            // `PaginatedResult<Output>`.
-            let response_type = if is_paged {
+            // Non-paged actions without `load` return `Vec<Output>`.
+            // Non-paged actions with `load` return `Vec<WrapperStruct>`.
+            // Paged actions without `load` return `PaginatedResult<Output>`.
+            //
+            // TODO: support paged + load combination
+            let response_type = if has_loads {
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+                quote::quote! { Vec<#wrapper_name> }
+            } else if is_paged {
                 quote::quote! { cinderblock_core::PaginatedResult<#ident> }
             } else {
                 quote::quote! { Vec<#ident> }
             };
 
-            // # In-memory data layer codegen
+            // # Filter codegen helper
             //
-            // When no custom data layer is specified, generate three things:
-            //
-            // 1. The filter trait impl (`InMemoryReadAction` or
-            //    `InMemoryPagedReadAction`) — contains the per-row predicate.
-            //
-            // 2. The `InMemoryPerformRead` impl — bridges the filter trait to
-            //    the framework's `PerformRead` by applying the filter to all
-            //    rows and either collecting into `Vec` (non-paged) or slicing
-            //    into `PaginatedResult` (paged).
-            //
-            // This mirrors the pattern in `cinderblock-sqlx-macros` where both
-            // the SQL filter trait and `SqlPerformRead` are generated together.
-            let data_layer_block = if data_layer_specified {
-                quote::quote! { }
-            } else if is_paged {
-                // # Filter codegen for InMemoryPagedReadAction
-                let filters = read_action.filters.iter().map(|filter| {
+            // Builds the chain of boolean clauses for the row predicate.
+            // Used by both the plain and relation-loading code paths.
+            let build_filters = |read_action: &cinderblock_extension_api::ActionRead| {
+                read_action.filters.iter().map(|filter| {
                     let field = &filter.field;
                     let op = match filter.op {
                         cinderblock_extension_api::ReadFilterOperation::Eq => quote::quote! { == },
@@ -235,7 +281,159 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             }
                         }
                     }
+                }).collect::<Vec<_>>()
+            };
+
+            // # In-memory data layer codegen
+            //
+            // When no custom data layer is specified, generate the
+            // InMemoryReadAction filter and either:
+            //   - `InMemoryPerformRead` (for actions without `load`), or
+            //   - A direct `PerformRead` impl (for actions with `load`)
+            //     that does the base query then loads relations from the
+            //     in-memory store.
+            let data_layer_block = if data_layer_specified {
+                quote::quote! { }
+            } else if has_loads {
+                // # Relation-loading PerformRead codegen
+                //
+                // For actions with `load`, we generate a direct `PerformRead`
+                // impl on `InMemoryDataLayer` (skipping the blanket) that:
+                //   1. Reads all base rows and applies filters
+                //   2. Loads each related resource type from the store
+                //   3. Assembles the response wrapper for each base row
+                let filters = build_filters(read_action);
+
+                // Generate the relation loading code. For each loaded relation:
+                //
+                // - `belongs_to`: collect FK values from base rows, load all
+                //   destination resources, build a HashMap<PK, Resource>,
+                //   then look up each base row's FK.
+                //
+                // - `has_many`: collect PK values from base rows, load all
+                //   destination resources, group them by their FK field into
+                //   a HashMap<FK, Vec<Resource>>.
+                let relation_loads = loaded_relations.iter().map(|rel| {
+                    let rel_ty = &rel.ty;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            // For belongs_to: the FK is on the base resource.
+                            // We load all destination resources and index them
+                            // by their primary key.
+                            quote::quote! {
+                                let all_related: Vec<#rel_ty> = dl.load_all::<#rel_ty>().await;
+                                let #map_name: ::std::collections::HashMap<String, #rel_ty> = all_related
+                                    .into_iter()
+                                    .map(|r| {
+                                        use cinderblock_core::Resource;
+                                        (r.primary_key().to_string(), r)
+                                    })
+                                    .collect();
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            // For has_many: the FK is on the related resource,
+                            // pointing back to the base resource's PK. We load
+                            // all related resources and group them by the FK
+                            // field value.
+                            quote::quote! {
+                                let all_related: Vec<#rel_ty> = dl.load_all::<#rel_ty>().await;
+                                let mut #map_name: ::std::collections::HashMap<String, Vec<#rel_ty>> =
+                                    ::std::collections::HashMap::new();
+                                for r in all_related {
+                                    let key = r.#source_attr.to_string();
+                                    #map_name.entry(key).or_default().push(r);
+                                }
+                            }
+                        }
+                    }
                 });
+
+                // # Wrapper assembly for each base row
+                //
+                // For each filtered base row, look up the loaded relations
+                // and construct the response wrapper struct.
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+
+                let relation_field_inits = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            let rel_ty = &rel.ty;
+                            let rel_name_str = rel.name.to_string();
+                            quote::quote! {
+                                #rel_name: #map_name
+                                    .get(&row.#source_attr.to_string())
+                                    .cloned()
+                                    .ok_or_else(|| -> Box<dyn ::std::error::Error + Send + Sync> {
+                                        format!(
+                                            "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                            #rel_name_str,
+                                            ::std::any::type_name::<#rel_ty>(),
+                                            row.#source_attr,
+                                        ).into()
+                                    })?
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            quote::quote! {
+                                #rel_name: {
+                                    use cinderblock_core::Resource;
+                                    #map_name
+                                        .get(&row.primary_key().to_string())
+                                        .cloned()
+                                        .unwrap_or_default()
+                                }
+                            }
+                        }
+                    }
+                });
+
+                quote::quote! {
+                    impl cinderblock_core::PerformRead<#action_name> for cinderblock_core::data_layer::in_memory::InMemoryDataLayer {
+                        async fn read(&self, args: &<#action_name as cinderblock_core::ReadAction>::Arguments) -> cinderblock_core::Result<<#action_name as cinderblock_core::ReadAction>::Response> {
+                            let dl = self;
+
+                            // Step 1: Load and filter base rows
+                            let base_rows: Vec<#ident> = dl.load_all::<#ident>().await
+                                .into_iter()
+                                .filter(|row| { #(#filters)* true })
+                                .collect();
+
+                            // Step 2: Load related resources
+                            #(#relation_loads)*
+
+                            // Step 3: Assemble response wrappers
+                            let results: cinderblock_core::Result<Vec<#wrapper_name>> = base_rows
+                                .into_iter()
+                                .map(|row| -> cinderblock_core::Result<#wrapper_name> {
+                                    Ok(#wrapper_name {
+                                        #(#relation_field_inits,)*
+                                        base: row,
+                                    })
+                                })
+                                .collect();
+
+                            results
+                        }
+                    }
+                }
+            } else if is_paged {
+                // # Filter codegen for InMemoryPagedReadAction
+                let filters = build_filters(read_action);
 
                 quote::quote! {
                     impl cinderblock_core::data_layer::in_memory::InMemoryPagedReadAction for #action_name {
@@ -290,41 +488,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 // conditional: when `None`, the clause is skipped (evaluates
                 // to `true`). This lets optional arguments act as "filter if
                 // provided" semantics.
-                let filters = read_action.filters.iter().map(|filter| {
-                    let field = &filter.field;
-
-                    let op = match filter.op {
-                        cinderblock_extension_api::ReadFilterOperation::Eq => quote::quote! { == },
-                    };
-
-                    match &filter.value {
-                        ReadFilterValue::Literal(expr) => {
-                            quote::quote! {
-                                row.#field #op #expr &&
-                            }
-                        }
-                        ReadFilterValue::Arg(arg_name) => {
-                            // Check if the argument type is Option<T> by
-                            // looking it up in the declared arguments.
-                            let arg_decl = read_action
-                                .arguments
-                                .iter()
-                                .find(|a| a.name == *arg_name)
-                                .expect("arg reference validated during parsing");
-
-                            if is_option_type(&arg_decl.ty) {
-                                // Optional arg: skip the filter when None
-                                quote::quote! {
-                                    args.#arg_name.as_ref().map_or(true, |v| row.#field #op *v) &&
-                                }
-                            } else {
-                                quote::quote! {
-                                    row.#field #op args.#arg_name &&
-                                }
-                            }
-                        }
-                    }
-                });
+                let filters = build_filters(read_action);
 
                 quote::quote! {
                     impl cinderblock_core::data_layer::in_memory::InMemoryReadAction for #action_name {
@@ -349,6 +513,8 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 #arguments_struct
 
                 #paged_impl
+
+                #response_wrapper
 
                 struct #action_name;
 

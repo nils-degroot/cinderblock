@@ -32,6 +32,7 @@ pub struct ResourceMacroInput {
     pub name: Vec<Ident>,
     pub data_layer: Option<Path>,
     pub attributes: Vec<ResourceAttributeInput>,
+    pub relations: Vec<RelationDecl>,
     pub actions: Vec<ResourceActionInput>,
     pub extensions: Vec<ExtensionDecl>,
 }
@@ -110,6 +111,13 @@ pub struct ActionRead {
     pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
     pub paged: Option<PagedConfig>,
+    /// Relations to eagerly load for this read action.
+    ///
+    /// Parsed from `load [author, comments];` inside a read action body.
+    /// Each identifier must reference a relation declared in the resource's
+    /// `relations { ... }` block. When empty, only the base resource columns
+    /// are returned.
+    pub load: Vec<Ident>,
 }
 
 /// Configuration for paged read actions.
@@ -199,6 +207,53 @@ pub struct ActionUpdate {
 pub enum Accept {
     Default,
     Only(Vec<Ident>),
+}
+
+// ---------------------------------------------------------------------------
+// # Relation DSL Types
+// ---------------------------------------------------------------------------
+
+/// Whether a relation is a belongs-to (FK on this resource) or a has-many
+/// (FK on the related resource pointing back here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    BelongsTo,
+    HasMany,
+}
+
+/// A single relation declaration inside the `relations { ... }` block.
+///
+/// DSL syntax:
+/// ```text
+/// relations {
+///     belongs_to author {
+///         ty User;
+///         source_attribute author_id;
+///     };
+///     has_many comments {
+///         ty Comment;
+///         source_attribute post_id;
+///     };
+/// }
+/// ```
+///
+/// `source_attribute` is the foreign key column name. For `belongs_to`, it
+/// lives on *this* resource. For `has_many`, it lives on the *related*
+/// resource.
+///
+/// `destination_attribute` is optional and defaults to the destination
+/// resource's primary key when omitted.
+#[derive(Debug)]
+pub struct RelationDecl {
+    pub name: Ident,
+    pub kind: RelationKind,
+    /// The destination resource type (e.g., `User`, `Comment`).
+    pub ty: Type,
+    /// The foreign key attribute name.
+    pub source_attribute: Ident,
+    /// The attribute on the destination resource to match against.
+    /// Defaults to the destination resource's primary key when `None`.
+    pub destination_attribute: Option<Ident>,
 }
 
 /// A mutation closure attached to an update action.
@@ -305,6 +360,7 @@ impl Parse for ResourceActionInput {
                         arguments: vec![],
                         filters: vec![],
                         paged: None,
+                        load: vec![],
                     })
                 } else {
                     let content;
@@ -314,6 +370,7 @@ impl Parse for ResourceActionInput {
                         arguments: vec![],
                         filters: vec![],
                         paged: None,
+                        load: vec![],
                     };
 
                     while !content.is_empty() {
@@ -419,6 +476,22 @@ impl Parse for ResourceActionInput {
 
                                     let _: Token![;] = content.parse()?;
                                 }
+                            }
+                            "load" => {
+                                // # Load keyword parsing
+                                //
+                                // Parses `load [author, comments];` — a bracketed
+                                // list of relation names to eagerly load for this
+                                // read action.
+                                let load_content;
+                                bracketed!(load_content in content);
+
+                                action.load = load_content
+                                    .parse_terminated(Ident::parse, Token![,])?
+                                    .into_iter()
+                                    .collect();
+
+                                let _: Token![;] = content.parse()?;
                             }
                             got => {
                                 return Err(syn::Error::new(
@@ -673,20 +746,119 @@ impl Parse for ResourceMacroInput {
         // # Actions block (optional)
         //
         // Parses `actions { <action_declarations> }` if present.
-        let mut actions = vec![];
+        let mut actions: Vec<ResourceActionInput> = vec![];
         let mut extensions = vec![];
+        let mut relations = vec![];
 
         // # Optional trailing sections
         //
-        // After attributes, the DSL supports `actions` and `extensions` blocks
-        // in any order. We peek at the next identifier and break out of the
-        // loop if it's not a recognized section keyword — this is important
-        // because `ExtensionMacroInput` appends a `config = { ... }` block
-        // after the resource tokens, and we must leave that unconsumed.
+        // After attributes, the DSL supports `relations`, `actions`, and
+        // `extensions` blocks in any order. We peek at the next identifier
+        // and break out of the loop if it's not a recognized section
+        // keyword — this is important because `ExtensionMacroInput` appends
+        // a `config = { ... }` block after the resource tokens, and we must
+        // leave that unconsumed.
         while input.peek(Ident) {
             let section: Ident = input.fork().parse()?;
 
             match section.to_string().as_str() {
+                "relations" => {
+                    let _: Ident = input.parse()?; // consume `relations`
+
+                    let content;
+                    braced!(content in input);
+
+                    // # Relation Declaration Parsing
+                    //
+                    // Each relation follows the pattern:
+                    //   belongs_to <name> { ty <Type>; source_attribute <ident>; };
+                    //   has_many <name> { ty <Type>; source_attribute <ident>; };
+                    while !content.is_empty() {
+                        let kind_ident: Ident = content.parse()?;
+                        let kind = match kind_ident.to_string().as_str() {
+                            "belongs_to" => RelationKind::BelongsTo,
+                            "has_many" => RelationKind::HasMany,
+                            got => {
+                                return Err(syn::Error::new(
+                                    kind_ident.span(),
+                                    format!(
+                                        "Unexpected relation kind `{got}`. \
+                                         Expected `belongs_to` or `has_many`."
+                                    ),
+                                ));
+                            }
+                        };
+
+                        let name: Ident = content.parse()?;
+
+                        let rel_content;
+                        braced!(rel_content in content);
+
+                        let mut ty: Option<Type> = None;
+                        let mut source_attribute: Option<Ident> = None;
+                        let mut destination_attribute: Option<Ident> = None;
+
+                        while !rel_content.is_empty() {
+                            let rel_key: Ident = rel_content.parse()?;
+
+                            match rel_key.to_string().as_str() {
+                                "ty" => {
+                                    ty = Some(rel_content.parse()?);
+                                    let _: Token![;] = rel_content.parse()?;
+                                }
+                                "source_attribute" => {
+                                    source_attribute = Some(rel_content.parse()?);
+                                    let _: Token![;] = rel_content.parse()?;
+                                }
+                                "destination_attribute" => {
+                                    destination_attribute = Some(rel_content.parse()?);
+                                    let _: Token![;] = rel_content.parse()?;
+                                }
+                                got => {
+                                    return Err(syn::Error::new(
+                                        rel_key.span(),
+                                        format!(
+                                            "Unexpected relation key `{got}`. Expected \
+                                             `ty`, `source_attribute`, or `destination_attribute`."
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+
+                        let ty = ty.ok_or_else(|| {
+                            syn::Error::new(
+                                name.span(),
+                                format!(
+                                    "Relation `{name}` is missing required `ty` declaration."
+                                ),
+                            )
+                        })?;
+
+                        let source_attribute = source_attribute.ok_or_else(|| {
+                            syn::Error::new(
+                                name.span(),
+                                format!(
+                                    "Relation `{name}` is missing required \
+                                     `source_attribute` declaration."
+                                ),
+                            )
+                        })?;
+
+                        relations.push(RelationDecl {
+                            name,
+                            kind,
+                            ty,
+                            source_attribute,
+                            destination_attribute,
+                        });
+
+                        // Optional trailing semicolon after the relation block
+                        if content.peek(Token![;]) {
+                            let _: Token![;] = content.parse()?;
+                        }
+                    }
+                }
                 "actions" => {
                     let _: Ident = input.parse()?; // consume `actions`
 
@@ -729,10 +901,32 @@ impl Parse for ResourceMacroInput {
             }
         }
 
+        // # Load reference validation
+        //
+        // Verify that every `load [...]` identifier in read actions
+        // references a relation declared in the `relations { ... }` block.
+        for action in &actions {
+            if let ResourceActionInputKind::Read(read) = &action.kind {
+                for load_name in &read.load {
+                    if !relations.iter().any(|r| r.name == *load_name) {
+                        return Err(syn::Error::new(
+                            load_name.span(),
+                            format!(
+                                "Read action `{}` loads undeclared relation `{load_name}`. \
+                                 Declare it in the `relations {{ ... }}` block.",
+                                action.name,
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(ResourceMacroInput {
             name,
             data_layer,
             attributes,
+            relations,
             actions,
             extensions,
         })
@@ -1523,5 +1717,441 @@ mod tests {
         let msg = err.to_string();
         check!(msg.contains("Unexpected paged config key"));
         check!(msg.contains("bogus"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Relation parsing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resource_with_belongs_to_relation() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+        });
+
+        check!(input.relations.len() == 1);
+        let rel = &input.relations[0];
+        check!(rel.name == "author");
+        check!(rel.kind == RelationKind::BelongsTo);
+        check!(rel.source_attribute == "author_id");
+        check!(rel.destination_attribute.is_none());
+    }
+
+    #[test]
+    fn resource_with_has_many_relation() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            relations {
+                has_many comments {
+                    ty Comment;
+                    source_attribute post_id;
+                };
+            }
+        });
+
+        check!(input.relations.len() == 1);
+        let rel = &input.relations[0];
+        check!(rel.name == "comments");
+        check!(rel.kind == RelationKind::HasMany);
+        check!(rel.source_attribute == "post_id");
+        check!(rel.destination_attribute.is_none());
+    }
+
+    #[test]
+    fn resource_with_multiple_relations() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+                post_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+                belongs_to post {
+                    ty Post;
+                    source_attribute post_id;
+                };
+            }
+        });
+
+        check!(input.relations.len() == 2);
+        check!(input.relations[0].name == "author");
+        check!(input.relations[0].kind == RelationKind::BelongsTo);
+        check!(input.relations[1].name == "post");
+        check!(input.relations[1].kind == RelationKind::BelongsTo);
+    }
+
+    #[test]
+    fn relation_with_destination_attribute() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                    destination_attribute user_id;
+                };
+            }
+        });
+
+        check!(input.relations.len() == 1);
+        assert!(let Some(dest) = &input.relations[0].destination_attribute);
+        check!(*dest == "user_id");
+    }
+
+    #[test]
+    fn relation_missing_ty_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+            }
+
+            relations {
+                belongs_to author {
+                    source_attribute author_id;
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("missing required `ty`"));
+    }
+
+    #[test]
+    fn relation_missing_source_attribute_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("missing required `source_attribute`"));
+    }
+
+    #[test]
+    fn relation_unknown_key_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                    bogus foo;
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("Unexpected relation key"));
+        check!(msg.contains("bogus"));
+    }
+
+    #[test]
+    fn unknown_relation_kind_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+            }
+
+            relations {
+                many_to_many tags {
+                    ty Tag;
+                    source_attribute tag_id;
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("Unexpected relation kind"));
+        check!(msg.contains("many_to_many"));
+    }
+
+    #[test]
+    fn resource_with_no_relations_block() {
+        let input = parse_resource(quote! {
+            name = Simple;
+
+            attributes {
+                id String;
+            }
+        });
+
+        check!(input.relations.is_empty());
+    }
+
+    #[test]
+    fn resource_with_empty_relations_block() {
+        let input = parse_resource(quote! {
+            name = Simple;
+
+            attributes {
+                id String;
+            }
+
+            relations {}
+        });
+
+        check!(input.relations.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Load keyword tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_action_with_load() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+
+            actions {
+                read all_with_author {
+                    load [author];
+                };
+            }
+        });
+
+        check!(input.actions.len() == 1);
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.load.len() == 1);
+        check!(read.load[0] == "author");
+    }
+
+    #[test]
+    fn read_action_with_multiple_loads() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+                has_many comments {
+                    ty Comment;
+                    source_attribute post_id;
+                };
+            }
+
+            actions {
+                read full {
+                    load [author, comments];
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.load.len() == 2);
+        check!(read.load[0] == "author");
+        check!(read.load[1] == "comments");
+    }
+
+    #[test]
+    fn read_action_without_load_has_empty_load_vec() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all;
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.load.is_empty());
+    }
+
+    #[test]
+    fn read_action_load_with_filters_and_paged() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+
+            actions {
+                read search_with_author {
+                    argument { status: Option<String> };
+                    filter { status == arg(status) };
+                    load [author];
+                    paged;
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.arguments.len() == 1);
+        check!(read.filters.len() == 1);
+        check!(read.load.len() == 1);
+        check!(read.load[0] == "author");
+        check!(read.paged.is_some());
+    }
+
+    #[test]
+    fn load_referencing_undeclared_relation_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+            }
+
+            actions {
+                read with_author {
+                    load [author];
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("undeclared relation"));
+        check!(msg.contains("author"));
+    }
+
+    #[test]
+    fn load_referencing_nonexistent_relation_with_relations_block_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+
+            actions {
+                read with_tags {
+                    load [tags];
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("undeclared relation"));
+        check!(msg.contains("tags"));
+    }
+
+    #[test]
+    fn relations_block_works_with_actions_and_extensions() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+
+            actions {
+                read all;
+                read all_with_author {
+                    load [author];
+                };
+            }
+
+            extensions {
+                cinderblock_json_api {
+                    list = true;
+                };
+            }
+        });
+
+        check!(input.relations.len() == 1);
+        check!(input.actions.len() == 2);
+        check!(input.extensions.len() == 1);
+
+        // First read action has no loads
+        assert!(let ResourceActionInputKind::Read(read_all) = &input.actions[0].kind);
+        check!(read_all.load.is_empty());
+
+        // Second read action loads author
+        assert!(let ResourceActionInputKind::Read(read_with_author) = &input.actions[1].kind);
+        check!(read_with_author.load.len() == 1);
+        check!(read_with_author.load[0] == "author");
     }
 }
