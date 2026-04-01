@@ -89,26 +89,51 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
     }
 }
 
+/// Filter trait for non-paged in-memory read actions. The generated
+/// `resource!` macro emits an impl for each non-paged read action.
 pub trait InMemoryReadAction: ReadAction {
     fn filter(row: &Self::Output, args: &Self::Arguments) -> bool;
 }
 
+/// Filter trait for paged in-memory read actions. Same filter interface as
+/// [`InMemoryReadAction`], but applied to paged actions which additionally
+/// require `Arguments: Paged`.
+pub trait InMemoryPagedReadAction: ReadAction {
+    fn filter(row: &Self::Output, args: &Self::Arguments) -> bool;
+}
+
+/// Unified execution trait that bridges the filter-based traits
+/// ([`InMemoryReadAction`] and [`InMemoryPagedReadAction`]) to the
+/// framework's [`PerformRead`] trait.
+///
+/// The `resource!` macro generates explicit impls of this trait for each
+/// read action, delegating to the appropriate filter logic. A single
+/// blanket `PerformRead` impl then dispatches to this trait.
+pub trait InMemoryPerformRead: ReadAction {
+    fn execute(
+        all: impl Iterator<Item = Self::Output>,
+        args: &Self::Arguments,
+    ) -> Self::Response;
+}
+
+/// Single `PerformRead` impl for `InMemoryDataLayer` that delegates to
+/// `InMemoryPerformRead::execute`.
 impl<R, A> PerformRead<A> for InMemoryDataLayer
 where
     R: Resource + 'static,
-    A: ReadAction<Output = R> + InMemoryReadAction + 'static,
+    A: ReadAction<Output = R> + InMemoryPerformRead + 'static,
 {
-    async fn read(&self, args: &A::Arguments) -> crate::Result<Vec<A::Output>> {
+    async fn read(&self, args: &A::Arguments) -> crate::Result<A::Response> {
         let state = STATE.clone();
         let state = state.read().await;
 
-        Ok(state
-            .get(&TypeId::of::<R>())
+        let type_map = state.get(&TypeId::of::<R>());
+        let all = type_map
             .iter()
             .flat_map(|map| map.values())
             .filter_map(|boxed| boxed.downcast_ref::<R>())
-            .filter(|row| A::filter(row, args))
-            .cloned()
-            .collect())
+            .cloned();
+
+        Ok(A::execute(all, args))
     }
 }

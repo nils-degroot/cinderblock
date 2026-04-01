@@ -178,7 +178,10 @@ pub trait SqlResource: cinderblock_core::Resource {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> cinderblock_core::Result<Self>;
 }
 
-pub trait SqlReadAction: ReadAction {
+pub trait SqlReadAction: ReadAction
+where
+    Self::Output: SqlResource,
+{
     /// Conditionally push filter clauses (including the WHERE keyword) into
     /// the query builder. Returns `true` if any WHERE conditions were added.
     ///
@@ -187,4 +190,139 @@ pub trait SqlReadAction: ReadAction {
     /// without the caller needing to predict the filter count.
     fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments)
         -> bool;
+}
+
+/// Same contract as [`SqlReadAction`] but for paged read actions.
+///
+/// A separate trait is used so the generated code can distinguish paged
+/// vs non-paged read actions at compile time.
+pub trait SqlPagedReadAction: ReadAction
+where
+    Self::Output: SqlResource,
+    Self::Arguments: cinderblock_core::Paged,
+{
+    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments)
+        -> bool;
+}
+
+/// Execute a non-paged SQL read query using the filters from [`SqlReadAction`].
+///
+/// Builds `SELECT * FROM table [WHERE ...]` and decodes rows via
+/// [`SqlResource::from_row`].
+///
+/// This is a standalone async function (not a trait method) to avoid
+/// Rust's coherence limitations with associated type equality constraints.
+/// The generated `SqlPerformRead` impls call this directly.
+pub async fn execute_sql_read<A>(
+    pool: &sqlx::SqlitePool,
+    args: &A::Arguments,
+) -> cinderblock_core::Result<Vec<A::Output>>
+where
+    A: SqlReadAction,
+    A::Output: SqlResource,
+{
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT * FROM {} ",
+        <A::Output as SqlResource>::TABLE_NAME,
+    ));
+    A::bind_filters(&mut builder, args);
+
+    let rows: Vec<sqlx::sqlite::SqliteRow> = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "read from `{}`: {e}",
+                <A::Output as SqlResource>::TABLE_NAME,
+            )
+        })?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for row in &rows {
+        result.push(<A::Output as SqlResource>::from_row(row)?);
+    }
+    Ok(result)
+}
+
+/// Execute a paged SQL read query using the filters from [`SqlPagedReadAction`].
+///
+/// Runs a `COUNT(*)` query for the total, then a `LIMIT/OFFSET` query for
+/// the current page. Decodes rows via [`SqlResource::from_row`].
+pub async fn execute_sql_paged_read<A>(
+    pool: &sqlx::SqlitePool,
+    args: &A::Arguments,
+) -> cinderblock_core::Result<cinderblock_core::PaginatedResult<A::Output>>
+where
+    A: SqlPagedReadAction,
+    A::Output: SqlResource,
+    A::Arguments: cinderblock_core::Paged,
+{
+    use cinderblock_core::{Paged, PaginatedResult, PaginationMeta};
+
+    let table = <A::Output as SqlResource>::TABLE_NAME;
+
+    // COUNT query for total
+    let mut count_builder =
+        sqlx::QueryBuilder::new(format!("SELECT COUNT(*) FROM {} ", table));
+    A::bind_filters(&mut count_builder, args);
+
+    let total: i64 = {
+        use sqlx::Row;
+        count_builder
+            .build()
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("count from `{table}`: {e}"))?
+            .try_get(0)
+            .map_err(|e| format!("decode count from `{table}`: {e}"))?
+    };
+    let total = total as u64;
+
+    let page = args.page();
+    let per_page = args.per_page();
+    let total_pages = total.div_ceil(per_page as u64) as u32;
+    let offset = ((page - 1) as u32) * per_page;
+
+    // Data query with LIMIT/OFFSET
+    let mut builder =
+        sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", table));
+    A::bind_filters(&mut builder, args);
+    builder.push(format!(" LIMIT {} OFFSET {}", per_page, offset));
+
+    let rows: Vec<sqlx::sqlite::SqliteRow> = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("paged read from `{table}`: {e}"))?;
+
+    let mut data = Vec::with_capacity(rows.len());
+    for row in &rows {
+        data.push(<A::Output as SqlResource>::from_row(row)?);
+    }
+
+    Ok(PaginatedResult {
+        data,
+        meta: PaginationMeta {
+            page,
+            per_page,
+            total,
+            total_pages,
+        },
+    })
+}
+
+/// Unified execution trait that bridges the filter-based traits
+/// ([`SqlReadAction`] and [`SqlPagedReadAction`]) to the framework's
+/// [`PerformRead`](cinderblock_core::PerformRead) trait.
+///
+/// The `cinderblock_sqlx` extension macro generates explicit impls of this
+/// trait for each read action, delegating to `SqlReadAction::execute` or
+/// `SqlPagedReadAction::execute` as appropriate. A single blanket
+/// `PerformRead` impl on `SqliteDataLayer` then dispatches to this trait.
+pub trait SqlPerformRead: ReadAction {
+    fn execute(
+        pool: &sqlx::SqlitePool,
+        args: &Self::Arguments,
+    ) -> impl std::future::Future<Output = cinderblock_core::Result<Self::Response>> + Send;
 }

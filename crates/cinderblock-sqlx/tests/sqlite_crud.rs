@@ -68,6 +68,20 @@ resource! {
             filter { done == arg(done) };
         }
 
+        read paged_all {
+            paged;
+        }
+
+        read paged_by_priority {
+            argument { priority: Priority };
+            filter { priority == arg(priority) };
+
+            paged {
+                default_per_page 3;
+                max_per_page 5;
+            };
+        }
+
         create add;
 
         update complete {
@@ -560,6 +574,231 @@ resource! {
         };
     }
 }
+
+// ---------------------------------------------------------------------------
+// # Paged Read Tests
+// ---------------------------------------------------------------------------
+
+/// Helper: insert `n` tasks with sequential titles and the given priority.
+async fn seed_tasks(ctx: &Context, n: usize, priority: Priority) -> Vec<Task> {
+    let mut tasks = Vec::with_capacity(n);
+    for i in 0..n {
+        let task = cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: format!("Task {i}"),
+                priority: priority.clone(),
+                done: false,
+            },
+            ctx,
+        )
+        .await
+        .expect("seed task");
+        tasks.push(task);
+    }
+    tasks
+}
+
+#[tokio::test]
+async fn paged_read_returns_paginated_result() {
+    let (ctx, _dl) = setup().await;
+    seed_tasks(&ctx, 5, Priority::Low).await;
+
+    let result = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: None,
+            per_page: None,
+        },
+    )
+    .await
+    .expect("paged read all");
+
+    // Default page is 1, default per_page is DEFAULT_PER_PAGE (100), so all 5
+    // tasks fit on the first page.
+    check!(result.data.len() == 5);
+    check!(result.meta.page == 1);
+    check!(result.meta.per_page == cinderblock_core::DEFAULT_PER_PAGE);
+    check!(result.meta.total == 5);
+    check!(result.meta.total_pages == 1);
+}
+
+#[tokio::test]
+async fn paged_read_page_navigation() {
+    let (ctx, _dl) = setup().await;
+    seed_tasks(&ctx, 7, Priority::Medium).await;
+
+    // Request 3 items per page — should yield 3 pages (3, 3, 1).
+    let page1 = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: Some(1),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 1");
+
+    check!(page1.data.len() == 3);
+    check!(page1.meta.page == 1);
+    check!(page1.meta.per_page == 3);
+    check!(page1.meta.total == 7);
+    check!(page1.meta.total_pages == 3);
+
+    let page2 = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: Some(2),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 2");
+
+    check!(page2.data.len() == 3);
+    check!(page2.meta.page == 2);
+
+    let page3 = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: Some(3),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 3");
+
+    check!(page3.data.len() == 1);
+    check!(page3.meta.page == 3);
+
+    // No overlap between pages.
+    let all_ids: Vec<_> = page1
+        .data
+        .iter()
+        .chain(page2.data.iter())
+        .chain(page3.data.iter())
+        .map(|t| t.task_id)
+        .collect();
+    let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+    check!(unique.len() == 7);
+}
+
+#[tokio::test]
+async fn paged_read_beyond_last_page_returns_empty() {
+    let (ctx, _dl) = setup().await;
+    seed_tasks(&ctx, 3, Priority::Low).await;
+
+    let result = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: Some(99),
+            per_page: Some(10),
+        },
+    )
+    .await
+    .expect("page beyond end");
+
+    check!(result.data.is_empty());
+    check!(result.meta.page == 99);
+    check!(result.meta.total == 3);
+    check!(result.meta.total_pages == 1);
+}
+
+#[tokio::test]
+async fn paged_read_empty_table() {
+    let (ctx, _dl) = setup().await;
+
+    let result = cinderblock_core::read::<Task, PagedAll>(
+        &ctx,
+        &PagedAllArguments {
+            page: None,
+            per_page: None,
+        },
+    )
+    .await
+    .expect("paged read on empty table");
+
+    check!(result.data.is_empty());
+    check!(result.meta.total == 0);
+    // With 0 total items, total_pages should be 0.
+    check!(result.meta.total_pages == 0);
+}
+
+#[tokio::test]
+async fn paged_read_with_custom_config_default_per_page() {
+    let (ctx, _dl) = setup().await;
+    // paged_by_priority has default_per_page 3, max_per_page 5.
+    seed_tasks(&ctx, 7, Priority::High).await;
+
+    let result = cinderblock_core::read::<Task, PagedByPriority>(
+        &ctx,
+        &PagedByPriorityArguments {
+            priority: Priority::High,
+            page: None,
+            per_page: None, // should default to 3
+        },
+    )
+    .await
+    .expect("paged by priority with default per_page");
+
+    check!(result.data.len() == 3);
+    check!(result.meta.per_page == 3);
+    check!(result.meta.total == 7);
+    check!(result.meta.total_pages == 3); // ceil(7/3) = 3
+}
+
+#[tokio::test]
+async fn paged_read_max_per_page_clamping() {
+    let (ctx, _dl) = setup().await;
+    // paged_by_priority has max_per_page 5.
+    seed_tasks(&ctx, 10, Priority::Low).await;
+
+    let result = cinderblock_core::read::<Task, PagedByPriority>(
+        &ctx,
+        &PagedByPriorityArguments {
+            priority: Priority::Low,
+            page: Some(1),
+            per_page: Some(999), // should be clamped to 5
+        },
+    )
+    .await
+    .expect("paged read with clamped per_page");
+
+    check!(result.data.len() == 5);
+    check!(result.meta.per_page == 5);
+    check!(result.meta.total == 10);
+    check!(result.meta.total_pages == 2);
+}
+
+#[tokio::test]
+async fn paged_read_with_filter_excludes_non_matching() {
+    let (ctx, _dl) = setup().await;
+    seed_tasks(&ctx, 4, Priority::High).await;
+    seed_tasks(&ctx, 6, Priority::Low).await;
+
+    let result = cinderblock_core::read::<Task, PagedByPriority>(
+        &ctx,
+        &PagedByPriorityArguments {
+            priority: Priority::High,
+            page: None,
+            per_page: Some(5), // max is 5
+        },
+    )
+    .await
+    .expect("paged read with filter");
+
+    // Only the 4 High-priority tasks should appear.
+    check!(result.data.len() == 4);
+    check!(result.meta.total == 4);
+    check!(result.meta.total_pages == 1);
+
+    for task in &result.data {
+        check!(task.priority == Priority::High);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// # Database-generated value tests
+// ---------------------------------------------------------------------------
 
 /// Create a fresh in-memory SQLite database with the `notes` table that
 /// uses an autoincrement PK and a server-side DEFAULT for `created_at`.
