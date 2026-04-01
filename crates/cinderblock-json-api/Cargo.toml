@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-cinderblock-core = { version = "0.1.0", path = "../cinderblock-core" }
-cinderblock-json-api-macros = { version = "0.1.0", path = "../cinderblock-json-api-macros" }
+cinderblock-core.workspace = true
+cinderblock-json-api-macros.workspace = true
 axum = "0.8"
 inventory = "0.3"
 serde = { version = "1", features = ["derive"] }

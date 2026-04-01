@@ -10,8 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-cinderblock-core = { version = "0.1.0", path = "../cinderblock-core" }
-cinderblock-sqlx-macros = { version = "0.1.0", path = "../cinderblock-sqlx-macros" }
+cinderblock-core.workspace = true
+cinderblock-sqlx-macros.workspace = true
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 

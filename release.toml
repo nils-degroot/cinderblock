@@ -1,0 +1,14 @@
+# All workspace crates share the same version (from [workspace.package]).
+shared-version = true
+
+# When a crate's version is bumped, automatically upgrade workspace
+# dependents to match.
+dependent-version = "upgrade"
+
+# Single commit for all version bumps.
+consolidate-commits = true
+pre-release-commit-message = "chore: release v{{version}}"
+
+# Tag convention matching the existing v0.1.0 tag.
+tag-name = "v{{version}}"
+tag-message = "chore: release v{{version}}"
