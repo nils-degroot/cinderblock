@@ -61,12 +61,18 @@ impl<R> DataLayer<R> for SqliteDataLayer
 where
     R: Resource + SqlResource + 'static,
 {
-    // # INSERT
+    // # INSERT with RETURNING
     //
-    // Builds: INSERT INTO {table} ({col1}, {col2}, ...) VALUES (?, ?, ...)
-    // and binds all column values via `SqlResource::bind_insert`.
-    async fn create(&self, resource: R) -> cinderblock_core::Result<()> {
-        let columns = R::COLUMN_NAMES.join(", ");
+    // Builds: INSERT INTO {table} ({col1}, {col2}, ...) VALUES (?, ?, ...) RETURNING *
+    //
+    // Uses `INSERT_COLUMN_NAMES` instead of `COLUMN_NAMES` so that columns
+    // marked `generated true` are omitted — their values come from the
+    // database (e.g. autoincrement PKs, server-side DEFAULT expressions).
+    //
+    // The RETURNING * clause lets us get back the full row including
+    // database-generated values in a single round-trip.
+    async fn create(&self, resource: R) -> cinderblock_core::Result<R> {
+        let columns = R::INSERT_COLUMN_NAMES.join(", ");
 
         let mut builder = sqlx::QueryBuilder::new(format!(
             "INSERT INTO {} ({}) VALUES (",
@@ -75,15 +81,15 @@ where
         ));
 
         resource.bind_insert(&mut builder);
-        builder.push(")");
+        builder.push(") RETURNING *");
 
-        builder
+        let row: SqliteRow = builder
             .build()
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
             .map_err(|e| format!("insert into `{}`: {e}", R::TABLE_NAME))?;
 
-        Ok(())
+        R::from_row(&row)
     }
 
     // # SELECT by primary key
