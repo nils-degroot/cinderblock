@@ -94,28 +94,44 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
+            let is_paged = read_action.paged.is_some();
+
             // # Arguments struct generation
             //
             // When the read action declares arguments, we generate a dedicated
             // `{ActionName}Arguments` struct with `Deserialize` so it can be
             // populated from query parameters. When no arguments are declared,
-            // we use `()` as the arguments type.
-            let has_arguments = !read_action.arguments.is_empty();
+            // we use `()` as the arguments type — unless the action is paged,
+            // in which case we always need an Arguments struct to hold
+            // `page` and `per_page` fields.
+            let has_user_arguments = !read_action.arguments.is_empty();
+            let needs_arguments_struct = has_user_arguments || is_paged;
 
-            let (arguments_type, arguments_struct) = if has_arguments {
+            let (arguments_type, arguments_struct) = if needs_arguments_struct {
                 let args_name = Ident::new(&format!("{action_name}Arguments"), action.name.span());
-                let arg_fields = read_action.arguments.iter().map(|arg| {
+                let user_arg_fields = read_action.arguments.iter().map(|arg| {
                     let name = &arg.name;
                     let ty = &arg.ty;
                     quote::quote! { pub #name: #ty }
                 });
+
+                // For paged actions, append `page` and `per_page` fields.
+                let paged_fields = if is_paged {
+                    quote::quote! {
+                        pub page: Option<u32>,
+                        pub per_page: Option<u32>,
+                    }
+                } else {
+                    quote::quote! {}
+                };
 
                 (
                     quote::quote! { #args_name },
                     quote::quote! {
                         #[derive(::std::fmt::Debug, cinderblock_core::serde::Deserialize)]
                         struct #args_name {
-                            #(#arg_fields),*
+                            #(#user_arg_fields,)*
+                            #paged_fields
                         }
                     },
                 )
@@ -123,9 +139,146 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 (quote::quote! { () }, quote::quote! {})
             };
 
-            // Setup InMemoryReadAction if no data layer is provided
+            // # Paged trait impl
+            //
+            // When the action is paged, generate a `Paged` impl on the
+            // Arguments struct that resolves defaults and clamping from
+            // the DSL config.
+            let paged_impl = if let Some(paged_config) = &read_action.paged {
+                let args_name = Ident::new(&format!("{action_name}Arguments"), action.name.span());
+
+                let default_per_page = match paged_config.default_per_page {
+                    Some(n) => quote::quote! { #n },
+                    None => quote::quote! { cinderblock_core::DEFAULT_PER_PAGE },
+                };
+
+                // Clamp per_page to max if configured, otherwise just use
+                // the resolved value directly.
+                let per_page_body = if let Some(max) = paged_config.max_per_page {
+                    quote::quote! {
+                        self.per_page.unwrap_or(#default_per_page).min(#max)
+                    }
+                } else {
+                    quote::quote! {
+                        self.per_page.unwrap_or(#default_per_page)
+                    }
+                };
+
+                quote::quote! {
+                    impl cinderblock_core::Paged for #args_name {
+                        fn page(&self) -> u32 {
+                            self.page.unwrap_or(1)
+                        }
+
+                        fn per_page(&self) -> u32 {
+                            #per_page_body
+                        }
+                    }
+                }
+            } else {
+                quote::quote! {}
+            };
+
+            // # Response type
+            //
+            // Non-paged actions return `Vec<Output>`, paged actions return
+            // `PaginatedResult<Output>`.
+            let response_type = if is_paged {
+                quote::quote! { cinderblock_core::PaginatedResult<#ident> }
+            } else {
+                quote::quote! { Vec<#ident> }
+            };
+
+            // # In-memory data layer codegen
+            //
+            // When no custom data layer is specified, generate three things:
+            //
+            // 1. The filter trait impl (`InMemoryReadAction` or
+            //    `InMemoryPagedReadAction`) — contains the per-row predicate.
+            //
+            // 2. The `InMemoryPerformRead` impl — bridges the filter trait to
+            //    the framework's `PerformRead` by applying the filter to all
+            //    rows and either collecting into `Vec` (non-paged) or slicing
+            //    into `PaginatedResult` (paged).
+            //
+            // This mirrors the pattern in `cinderblock-sqlx-macros` where both
+            // the SQL filter trait and `SqlPerformRead` are generated together.
             let data_layer_block = if data_layer_specified {
                 quote::quote! { }
+            } else if is_paged {
+                // # Filter codegen for InMemoryPagedReadAction
+                let filters = read_action.filters.iter().map(|filter| {
+                    let field = &filter.field;
+                    let op = match filter.op {
+                        cinderblock_extension_api::ReadFilterOperation::Eq => quote::quote! { == },
+                    };
+                    match &filter.value {
+                        ReadFilterValue::Literal(expr) => {
+                            quote::quote! {
+                                row.#field #op #expr &&
+                            }
+                        }
+                        ReadFilterValue::Arg(arg_name) => {
+                            let arg_decl = read_action
+                                .arguments
+                                .iter()
+                                .find(|a| a.name == *arg_name)
+                                .expect("arg reference validated during parsing");
+                            if is_option_type(&arg_decl.ty) {
+                                quote::quote! {
+                                    args.#arg_name.as_ref().map_or(true, |v| row.#field #op *v) &&
+                                }
+                            } else {
+                                quote::quote! {
+                                    row.#field #op args.#arg_name &&
+                                }
+                            }
+                        }
+                    }
+                });
+
+                quote::quote! {
+                    impl cinderblock_core::data_layer::in_memory::InMemoryPagedReadAction for #action_name {
+                        fn filter(row: &Self::Output, args: &Self::Arguments) -> bool {
+                            #(#filters)* true
+                        }
+                    }
+
+                    impl cinderblock_core::data_layer::in_memory::InMemoryPerformRead for #action_name {
+                        fn execute(
+                            all: impl Iterator<Item = Self::Output>,
+                            args: &Self::Arguments,
+                        ) -> Self::Response {
+                            use cinderblock_core::Paged;
+
+                            let filtered: Vec<Self::Output> = all
+                                .filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryPagedReadAction>::filter(row, args))
+                                .collect();
+
+                            let total = filtered.len() as u64;
+                            let page = args.page();
+                            let per_page = args.per_page();
+                            let total_pages = if total == 0 { 1 } else { ((total as u32).saturating_add(per_page - 1)) / per_page };
+
+                            let skip = ((page.saturating_sub(1)) as usize) * (per_page as usize);
+                            let data: Vec<Self::Output> = filtered
+                                .into_iter()
+                                .skip(skip)
+                                .take(per_page as usize)
+                                .collect();
+
+                            cinderblock_core::PaginatedResult {
+                                data,
+                                meta: cinderblock_core::PaginationMeta {
+                                    page,
+                                    per_page,
+                                    total,
+                                    total_pages,
+                                },
+                            }
+                        }
+                    }
+                }
             } else {
                 // # Filter codegen for InMemoryReadAction
                 //
@@ -179,11 +332,23 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             #(#filters)* true
                         }
                     }
+
+                    impl cinderblock_core::data_layer::in_memory::InMemoryPerformRead for #action_name {
+                        fn execute(
+                            all: impl Iterator<Item = Self::Output>,
+                            args: &Self::Arguments,
+                        ) -> Self::Response {
+                            all.filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryReadAction>::filter(row, args))
+                                .collect()
+                        }
+                    }
                 }
             };
 
             quote::quote! {
                 #arguments_struct
+
+                #paged_impl
 
                 struct #action_name;
 
@@ -191,6 +356,8 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                     type Output = #ident;
 
                     type Arguments = #arguments_type;
+
+                    type Response = #response_type;
                 }
 
                 #data_layer_block

@@ -109,6 +109,22 @@ pub enum ResourceActionInputKind {
 pub struct ActionRead {
     pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
+    pub paged: Option<PagedConfig>,
+}
+
+/// Configuration for paged read actions.
+///
+/// Parsed from `paged;` (all defaults) or `paged { default_per_page 50; max_per_page 200; };`
+/// inside a read action body. When both fields are `None`, framework defaults apply.
+#[derive(Debug)]
+pub struct PagedConfig {
+    /// Default number of items per page when the client doesn't specify `per_page`.
+    /// When `None`, the framework default (`cinderblock_core::DEFAULT_PER_PAGE`) is used.
+    pub default_per_page: Option<u32>,
+    /// Maximum allowed `per_page` value. Client requests exceeding this are
+    /// silently clamped. When `None`, defaults to `default_per_page` (or the
+    /// framework default).
+    pub max_per_page: Option<u32>,
 }
 
 /// A single argument declared in a read action's `argument { ... }` block.
@@ -288,6 +304,7 @@ impl Parse for ResourceActionInput {
                     ResourceActionInputKind::Read(ActionRead {
                         arguments: vec![],
                         filters: vec![],
+                        paged: None,
                     })
                 } else {
                     let content;
@@ -296,6 +313,7 @@ impl Parse for ResourceActionInput {
                     let mut action = ActionRead {
                         arguments: vec![],
                         filters: vec![],
+                        paged: None,
                     };
 
                     while !content.is_empty() {
@@ -347,6 +365,60 @@ impl Parse for ResourceActionInput {
                                 action.filters.push(ReadFilter { field, op, value });
 
                                 let _: Token![;] = content.parse()?;
+                            }
+                            "paged" => {
+                                // # Paged keyword parsing
+                                //
+                                // Supports two forms:
+                                //   - `paged;` — use framework defaults
+                                //   - `paged { default_per_page 50; max_per_page 200; };` —
+                                //     per-action overrides
+                                if content.peek(Token![;]) {
+                                    let _: Token![;] = content.parse()?;
+                                    action.paged = Some(PagedConfig {
+                                        default_per_page: None,
+                                        max_per_page: None,
+                                    });
+                                } else {
+                                    let paged_content;
+                                    braced!(paged_content in content);
+
+                                    let mut paged_config = PagedConfig {
+                                        default_per_page: None,
+                                        max_per_page: None,
+                                    };
+
+                                    while !paged_content.is_empty() {
+                                        let paged_key: Ident = paged_content.parse()?;
+                                        match paged_key.to_string().as_str() {
+                                            "default_per_page" => {
+                                                let lit: syn::LitInt = paged_content.parse()?;
+                                                paged_config.default_per_page =
+                                                    Some(lit.base10_parse()?);
+                                                let _: Token![;] = paged_content.parse()?;
+                                            }
+                                            "max_per_page" => {
+                                                let lit: syn::LitInt = paged_content.parse()?;
+                                                paged_config.max_per_page =
+                                                    Some(lit.base10_parse()?);
+                                                let _: Token![;] = paged_content.parse()?;
+                                            }
+                                            got => {
+                                                return Err(syn::Error::new(
+                                                    paged_key.span(),
+                                                    format!(
+                                                        "Unexpected paged config key, got `{got}`. \
+                                                         Expected `default_per_page` or `max_per_page`."
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    action.paged = Some(paged_config);
+
+                                    let _: Token![;] = content.parse()?;
+                                }
                             }
                             got => {
                                 return Err(syn::Error::new(
@@ -1370,5 +1442,86 @@ mod tests {
         assert!(let ReadFilterValue::Arg(name) = &read.filters[0].value);
         check!(*name == "priority");
         check!(let ReadFilterValue::Literal(_) = &read.filters[1].value);
+    }
+
+    // -----------------------------------------------------------------------
+    // Paged read action tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_action_with_paged() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all {
+                paged;
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        assert!(let Some(paged) = &read.paged);
+        check!(paged.default_per_page.is_none());
+        check!(paged.max_per_page.is_none());
+    }
+
+    #[test]
+    fn read_action_with_paged_config() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read search {
+                argument { status: Option<String> };
+                filter { status == arg(status) };
+                paged {
+                    default_per_page 50;
+                    max_per_page 200;
+                };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.arguments.len() == 1);
+        check!(read.filters.len() == 1);
+        assert!(let Some(paged) = &read.paged);
+        check!(paged.default_per_page == Some(50));
+        check!(paged.max_per_page == Some(200));
+    }
+
+    #[test]
+    fn read_action_with_paged_partial_config() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all {
+                paged {
+                    max_per_page 500;
+                };
+            }
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        assert!(let Some(paged) = &read.paged);
+        check!(paged.default_per_page.is_none());
+        check!(paged.max_per_page == Some(500));
+    }
+
+    #[test]
+    fn read_action_without_paged() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all;
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.paged.is_none());
+    }
+
+    #[test]
+    fn read_action_paged_invalid_key_produces_error() {
+        let result = syn::parse2::<ResourceActionInput>(quote! {
+            read all {
+                paged {
+                    bogus 42;
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("Unexpected paged config key"));
+        check!(msg.contains("bogus"));
     }
 }

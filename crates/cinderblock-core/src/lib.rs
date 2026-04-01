@@ -202,6 +202,41 @@ pub mod data_layer;
 
 pub type Result<T, E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
 
+/// Default number of items per page for paged read actions.
+///
+/// Individual actions can override this via `default_per_page` in the DSL.
+pub const DEFAULT_PER_PAGE: u32 = 100;
+
+// ---------------------------------------------------------------------------
+// # Pagination Types
+// ---------------------------------------------------------------------------
+
+/// Result type for paged read actions, containing the data page and metadata
+/// needed to navigate the full result set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PaginatedResult<T> {
+    pub data: Vec<T>,
+    pub meta: PaginationMeta,
+}
+
+/// Metadata describing the current page position within the full result set.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PaginationMeta {
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+    pub total_pages: u32,
+}
+
+/// Trait implemented on the **Arguments type** of paged read actions.
+///
+/// The generated `Paged` impl resolves `Option<u32>` fields into concrete
+/// page/per_page values using defaults and clamping from the DSL config.
+pub trait Paged {
+    fn page(&self) -> u32;
+    fn per_page(&self) -> u32;
+}
+
 #[derive(Debug, Default)]
 pub struct Context {
     data_layers: HashMap<TypeId, Box<dyn Any + Sync + Send + 'static>>,
@@ -258,19 +293,27 @@ pub trait Resource:
     fn primary_key(&self) -> &Self::PrimaryKey;
 }
 
-/// Marker trait showing indicating that a struct is a read action.
+/// Marker trait indicating that a struct is a read action.
+///
+/// Non-paged actions set `Response = Vec<Output>`. Paged actions set
+/// `Response = PaginatedResult<Output>`. This lets the framework return
+/// the correct shape without runtime branching.
 pub trait ReadAction {
     /// Resource returned when calling the action.
     type Output: Resource;
 
     /// Arguments used to get the resource. Could be used in filters.
     type Arguments: Sync;
+
+    /// The full response type returned by this read action. Non-paged
+    /// actions use `Vec<Output>`, paged actions use `PaginatedResult<Output>`.
+    type Response: Send;
 }
 
 /// Trait indicating that a [`DataLayer`] can perform [`ReadAction`] `A`.
 pub trait PerformRead<A: ReadAction> {
     /// Perform the read action on the provided data layer.
-    fn read(&self, args: &A::Arguments) -> impl Future<Output = Result<Vec<A::Output>>>;
+    fn read(&self, args: &A::Arguments) -> impl Future<Output = Result<A::Response>>;
 }
 
 /// Trait placed on a [`Resource`] specifying how to create the resource using action `A`.
@@ -318,7 +361,7 @@ where
 }
 
 /// Read resource `R` using action `A`.
-pub async fn read<R, A>(ctx: &Context, args: &A::Arguments) -> Result<Vec<R>>
+pub async fn read<R, A>(ctx: &Context, args: &A::Arguments) -> Result<A::Response>
 where
     R: Resource,
     A: ReadAction<Output = R>,

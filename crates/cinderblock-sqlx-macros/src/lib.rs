@@ -316,8 +316,30 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 }
             }).collect();
 
+            // Choose `SqlPagedReadAction` or `SqlReadAction` based on
+            // whether the action is paged. The filter body is identical
+            // for both; only the trait name differs.
+            let is_paged = action_read.paged.is_some();
+            let trait_path = if is_paged {
+                quote::quote! { cinderblock_sqlx::SqlPagedReadAction }
+            } else {
+                quote::quote! { cinderblock_sqlx::SqlReadAction }
+            };
+
+            // Generate `SqlPerformRead` that delegates to the appropriate
+            // standalone execute function.
+            let perform_read_body = if is_paged {
+                quote::quote! {
+                    cinderblock_sqlx::execute_sql_paged_read::<Self>(pool, args).await
+                }
+            } else {
+                quote::quote! {
+                    cinderblock_sqlx::execute_sql_read::<Self>(pool, args).await
+                }
+            };
+
             quote::quote! {
-                impl cinderblock_sqlx::SqlReadAction for #action_name {
+                impl #trait_path for #action_name {
                     fn bind_filters(
                         builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
                         args: &Self::Arguments,
@@ -325,6 +347,15 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         let mut filter_count: u32 = 0;
                         #(#filter_stmts)*
                         filter_count > 0
+                    }
+                }
+
+                impl cinderblock_sqlx::SqlPerformRead for #action_name {
+                    async fn execute(
+                        pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                        args: &Self::Arguments,
+                    ) -> cinderblock_core::Result<Self::Response> {
+                        #perform_read_body
                     }
                 }
             }

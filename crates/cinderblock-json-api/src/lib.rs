@@ -318,6 +318,25 @@ pub struct Response<T: serde::Serialize> {
     pub data: T,
 }
 
+/// JSON API response envelope for paginated list endpoints.
+///
+/// Returns `{ "data": [...], "meta": { page, per_page, total, total_pages } }`.
+/// Used by paged read action handlers instead of the plain [`Response`] envelope.
+#[derive(Debug, serde::Serialize)]
+pub struct PaginatedResponse<T: serde::Serialize> {
+    pub data: Vec<T>,
+    pub meta: PaginationMeta,
+}
+
+/// Pagination metadata included in [`PaginatedResponse`].
+#[derive(Debug, serde::Serialize)]
+pub struct PaginationMeta {
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+    pub total_pages: u32,
+}
+
 // # PartialSchema / ToSchema for Response<T>
 //
 // Manual implementations so the generated OpenAPI spec can describe the
@@ -345,6 +364,76 @@ where
 {
     fn name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("Response")
+    }
+}
+
+// # PartialSchema / ToSchema for PaginatedResponse<T>
+//
+// Describes the `{ "data": [...], "meta": {...} }` shape for OpenAPI specs.
+impl<T> utoipa::PartialSchema for PaginatedResponse<T>
+where
+    T: serde::Serialize + utoipa::PartialSchema,
+{
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{
+            ArrayBuilder, ObjectBuilder, SchemaFormat, SchemaType, Type,
+        };
+
+        let meta_schema = ObjectBuilder::new()
+            .schema_type(SchemaType::new(Type::Object))
+            .property(
+                "page",
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::new(Type::Integer))
+                    .format(Some(SchemaFormat::KnownFormat(
+                        utoipa::openapi::KnownFormat::Int32,
+                    ))),
+            )
+            .required("page")
+            .property(
+                "per_page",
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::new(Type::Integer))
+                    .format(Some(SchemaFormat::KnownFormat(
+                        utoipa::openapi::KnownFormat::Int32,
+                    ))),
+            )
+            .required("per_page")
+            .property(
+                "total",
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::new(Type::Integer))
+                    .format(Some(SchemaFormat::KnownFormat(
+                        utoipa::openapi::KnownFormat::Int64,
+                    ))),
+            )
+            .required("total")
+            .property(
+                "total_pages",
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::new(Type::Integer))
+                    .format(Some(SchemaFormat::KnownFormat(
+                        utoipa::openapi::KnownFormat::Int32,
+                    ))),
+            )
+            .required("total_pages");
+
+        ObjectBuilder::new()
+            .schema_type(SchemaType::new(Type::Object))
+            .property("data", ArrayBuilder::new().items(T::schema()))
+            .required("data")
+            .property("meta", meta_schema)
+            .required("meta")
+            .into()
+    }
+}
+
+impl<T> utoipa::ToSchema for PaginatedResponse<T>
+where
+    T: serde::Serialize + utoipa::PartialSchema,
+{
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PaginatedResponse")
     }
 }
 

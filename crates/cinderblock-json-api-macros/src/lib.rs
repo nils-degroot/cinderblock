@@ -423,9 +423,61 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
             let handler_and_method = match &action_def.kind {
                 ResourceActionInputKind::Read(action_read) => {
-                    let has_arguments = !action_read.arguments.is_empty();
+                    let is_paged = action_read.paged.is_some();
+                    let has_user_arguments = !action_read.arguments.is_empty();
+                    let needs_arguments_struct = has_user_arguments || is_paged;
 
-                    let handler = if has_arguments {
+                    let handler = if is_paged {
+                        // Paged reads always have an Arguments struct
+                        // (with at least page/per_page fields).
+                        let args_type =
+                            Ident::new(&format!("{action_type_name}Arguments"), route.action.span());
+                        quote::quote! {
+                            move |
+                                cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
+                            | {
+                                let ctx = ctx.clone();
+                                async move {
+                                    cinderblock_json_api::tracing::info!(
+                                        resource = stringify!(#ident),
+                                        action = #action_name_str,
+                                        "handling paged read request"
+                                    );
+
+                                    match cinderblock_core::read::<#ident, #action_type>(&ctx, &args).await {
+                                        Ok(result) => (
+                                            cinderblock_json_api::axum::http::StatusCode::OK,
+                                            cinderblock_json_api::axum::Json(
+                                                cinderblock_json_api::PaginatedResponse {
+                                                    data: result.data,
+                                                    meta: cinderblock_json_api::PaginationMeta {
+                                                        page: result.meta.page,
+                                                        per_page: result.meta.per_page,
+                                                        total: result.meta.total,
+                                                        total_pages: result.meta.total_pages,
+                                                    },
+                                                },
+                                            ),
+                                        )
+                                            .into_response(),
+                                        Err(err) => {
+                                            cinderblock_json_api::tracing::error!(
+                                                resource = stringify!(#ident),
+                                                action = #action_name_str,
+                                                error = %err,
+                                                "paged read request failed"
+                                            );
+                                            (
+                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                                err.to_string(),
+                                            )
+                                                .into_response()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if needs_arguments_struct {
                         let args_type =
                             Ident::new(&format!("{action_type_name}Arguments"), route.action.span());
                         quote::quote! {
@@ -904,6 +956,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
                 match &action_def.kind {
                     ResourceActionInputKind::Read(action_read) => {
+                        let is_paged = action_read.paged.is_some();
+
                         // Query parameters for read action arguments.
                         let query_params: Vec<_> = action_read.arguments.iter().map(|arg| {
                             let arg_name_str = arg.name.to_string();
@@ -934,6 +988,60 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             }
                         }).collect();
 
+                        // For paged reads, add `page` and `per_page` query params
+                        // to the OpenAPI spec.
+                        let paged_query_params = if is_paged {
+                            quote::quote! {
+                                .parameter(
+                                    cinderblock_json_api::utoipa::openapi::path::ParameterBuilder::new()
+                                        .name("page")
+                                        .parameter_in(cinderblock_json_api::utoipa::openapi::path::ParameterIn::Query)
+                                        .required(cinderblock_json_api::utoipa::openapi::Required::False)
+                                        .schema(Some(<u32 as cinderblock_json_api::FieldSchema>::field_schema()))
+                                        .description(Some("Page number (1-indexed, default: 1)"))
+                                        .build(),
+                                )
+                                .parameter(
+                                    cinderblock_json_api::utoipa::openapi::path::ParameterBuilder::new()
+                                        .name("per_page")
+                                        .parameter_in(cinderblock_json_api::utoipa::openapi::path::ParameterIn::Query)
+                                        .required(cinderblock_json_api::utoipa::openapi::Required::False)
+                                        .schema(Some(<u32 as cinderblock_json_api::FieldSchema>::field_schema()))
+                                        .description(Some("Items per page"))
+                                        .build(),
+                                )
+                            }
+                        } else {
+                            quote::quote! {}
+                        };
+
+                        // Response schema differs: paged reads include meta,
+                        // non-paged reads return { data: [...] }.
+                        let response_schema = if is_paged {
+                            quote::quote! {
+                                <cinderblock_json_api::PaginatedResponse<#ident> as cinderblock_json_api::utoipa::PartialSchema>::schema()
+                            }
+                        } else {
+                            quote::quote! {
+                                cinderblock_json_api::utoipa::openapi::RefOr::<cinderblock_json_api::utoipa::openapi::schema::Schema>::from(
+                                    cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                        .schema_type(
+                                            cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                cinderblock_json_api::utoipa::openapi::schema::Type::Object,
+                                            ),
+                                        )
+                                        .property(
+                                            "data",
+                                            cinderblock_json_api::utoipa::openapi::schema::ArrayBuilder::new()
+                                                .items(<#ident as cinderblock_json_api::utoipa::PartialSchema>::schema()),
+                                        )
+                                        .required("data")
+                                )
+                            }
+                        };
+
+                        let summary_prefix = if is_paged { "Paged read" } else { "Read" };
+
                         quote::quote! {
                             .path(
                                 #full_path,
@@ -942,9 +1050,10 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                     cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
                                         .operation_id(Some(#operation_id))
                                         .tag(#ident_str)
-                                        .summary(Some(format!("Read {} via {}", #ident_str, #action_name_str)))
+                                        .summary(Some(format!("{} {} via {}", #summary_prefix, #ident_str, #action_name_str)))
                                         #pk_parameter
                                         #(#query_params)*
+                                        #paged_query_params
                                         .response(
                                             "200",
                                             cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
@@ -952,20 +1061,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                                 .content(
                                                     "application/json",
                                                     cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
-                                                        .schema(Some(
-                                                            cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
-                                                                .schema_type(
-                                                                    cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
-                                                                        cinderblock_json_api::utoipa::openapi::schema::Type::Object,
-                                                                    ),
-                                                                )
-                                                                .property(
-                                                                    "data",
-                                                                    cinderblock_json_api::utoipa::openapi::schema::ArrayBuilder::new()
-                                                                        .items(<#ident as cinderblock_json_api::utoipa::PartialSchema>::schema()),
-                                                                )
-                                                                .required("data"),
-                                                        ))
+                                                        .schema(Some(#response_schema))
                                                         .build(),
                                                 )
                                                 .build(),

@@ -7,7 +7,7 @@
 use cinderblock_core::{PerformRead, ReadAction, Resource, data_layer::DataLayer};
 use sqlx::{SqlitePool, sqlite::SqliteRow};
 
-use crate::{SqlReadAction, SqlResource};
+use crate::{SqlPerformRead, SqlResource};
 
 // ---------------------------------------------------------------------------
 // # SqliteDataLayer
@@ -162,32 +162,18 @@ where
     }
 }
 
+/// Single `PerformRead` impl that delegates to `SqlPerformRead::execute`.
+///
+/// The `cinderblock_sqlx` extension macro generates `SqlPerformRead` impls
+/// for each read action, routing to `SqlReadAction::execute` (non-paged)
+/// or `SqlPagedReadAction::execute` (paged) as appropriate.
 impl<R, A> PerformRead<A> for SqliteDataLayer
 where
     R: Resource + SqlResource + 'static,
-    A: ReadAction<Output = R> + SqlReadAction + 'static,
+    A: ReadAction<Output = R> + SqlPerformRead + 'static,
 {
-    async fn read(&self, args: &A::Arguments) -> cinderblock_core::Result<Vec<A::Output>> {
-        let mut builder = sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", R::TABLE_NAME));
-
-        // bind_filters handles emitting the WHERE keyword internally and
-        // returns whether any conditions were added. This simplifies the
-        // caller when optional arguments may or may not produce clauses.
-        A::bind_filters(&mut builder, args);
-
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| format!("read from `{}`: {e}", R::TABLE_NAME))?;
-
-        let mut result = Vec::with_capacity(rows.len());
-
-        for row in rows {
-            let row = R::from_row(&row)?;
-            result.push(row);
-        }
-
-        Ok(result)
+    async fn read(&self, args: &A::Arguments) -> cinderblock_core::Result<A::Response> {
+        A::execute(&self.pool, args).await
     }
 }
+
