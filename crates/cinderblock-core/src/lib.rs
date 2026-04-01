@@ -301,8 +301,7 @@ where
 {
     let resource = R::from_create_input(input);
     let dl = ctx.get_data_layer::<R::DataLayer>();
-    dl.create(resource.clone()).await?;
-    Ok(resource)
+    dl.create(resource).await
 }
 
 /// Update resource `R` using action `A`. First

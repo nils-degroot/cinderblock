@@ -22,7 +22,7 @@ impl InMemoryDataLayer {
 }
 
 impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
-    async fn create(&self, resource: R) -> crate::Result<()> {
+    async fn create(&self, resource: R) -> crate::Result<R> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
@@ -32,7 +32,7 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
             Box::new(resource.clone()),
         );
 
-        Ok(())
+        Ok(resource)
     }
 
     async fn read(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {

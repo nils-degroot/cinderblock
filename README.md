@@ -1,3 +1,5 @@
+> WARNING: This is far from completed. Expect many breaking changes.
+
 # Cinderblock
 
 A declarative, resource-oriented application framework for Rust.
@@ -82,15 +84,15 @@ extensions {
 
 ## Crates
 
-| Crate | Description |
-|---|---|
-| `cinderblock-core` | Resource trait, CRUD functions, Context, in-memory data layer |
-| `cinderblock-core-macros` | The `resource!` proc macro |
-| `cinderblock-extension-api` | Shared DSL parser types for extension authors |
-| `cinderblock-json-api` | JSON REST API extension (Axum router, OpenAPI, Swagger UI) |
-| `cinderblock-json-api-macros` | JSON API extension proc macro |
-| `cinderblock-sqlx` | SQLx data layer extension (SQLite) |
-| `cinderblock-sqlx-macros` | SQLx extension proc macro |
+| Crate                         | Description                                                   |
+| ----------------------------- | ------------------------------------------------------------- |
+| `cinderblock-core`            | Resource trait, CRUD functions, Context, in-memory data layer |
+| `cinderblock-core-macros`     | The `resource!` proc macro                                    |
+| `cinderblock-extension-api`   | Shared DSL parser types for extension authors                 |
+| `cinderblock-json-api`        | JSON REST API extension (Axum router, OpenAPI, Swagger UI)    |
+| `cinderblock-json-api-macros` | JSON API extension proc macro                                 |
+| `cinderblock-sqlx`            | SQLx data layer extension (SQLite)                            |
+| `cinderblock-sqlx-macros`     | SQLx extension proc macro                                     |
 
 ## Running the Examples
 
@@ -111,10 +113,6 @@ PATCH  /helpdesk/support/ticket/{id}/close
 DELETE /helpdesk/support/ticket/{id}/remove
 GET    /openapi.json
 ```
-
-## Status
-
-Early development (0.1.0). The API is not stable.
 
 ## License
 

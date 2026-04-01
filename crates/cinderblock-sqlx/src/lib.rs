@@ -25,6 +25,25 @@
 //! The only configuration is the `table` name. Column names are derived
 //! automatically from attribute names using `snake_case`.
 //!
+//! # Database-generated columns
+//!
+//! Attributes marked `generated true` are omitted from INSERT and UPDATE
+//! statements — their values come from the database (e.g. autoincrement
+//! primary keys, server-side DEFAULT expressions). The column is still
+//! read back via `RETURNING *` / SELECT so the Rust struct always has the
+//! correct database-assigned value.
+//!
+//! ```rust,ignore
+//! attributes {
+//!     id i64 {
+//!         primary_key true;
+//!         generated true;     // Database provides the value via AUTOINCREMENT
+//!         writable false;
+//!     }
+//!     title String;
+//! }
+//! ```
+//!
 //! # Type mapping
 //!
 //! This extension deliberately does **not** define its own type-mapping trait.
@@ -116,18 +135,30 @@ pub mod sqlite;
 /// `uuid` feature, etc.) just works.
 pub trait SqlResource: cinderblock_core::Resource {
     const TABLE_NAME: &'static str;
+
+    /// All column names on the table, in declaration order. Used for
+    /// SELECT and from_row decoding.
     const COLUMN_NAMES: &'static [&'static str];
+
+    /// Column names included in INSERT statements — excludes columns
+    /// marked `generated true`, whose values are provided by the database
+    /// (e.g. autoincrement primary keys, server-side defaults).
+    const INSERT_COLUMN_NAMES: &'static [&'static str];
+
     const PRIMARY_KEY_COLUMN: &'static str;
 
-    /// Push bind values for all columns into the query builder, separated
-    /// by commas (in the same order as `COLUMN_NAMES`).
+    /// Push bind values for non-generated columns into the query builder,
+    /// separated by commas (in the same order as `INSERT_COLUMN_NAMES`).
+    ///
+    /// Columns marked `generated true` are omitted — those values come
+    /// from the database itself.
     ///
     /// The caller is responsible for emitting the `INSERT INTO ... VALUES (`
     /// prefix before calling this, and the closing `)` afterwards.
     fn bind_insert(&self, builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>);
 
-    /// Push bind values for non-primary-key columns into the query builder,
-    /// each as `column_name = ?` separated by commas.
+    /// Push bind values for non-primary-key, non-generated columns into the
+    /// query builder, each as `column_name = ?` separated by commas.
     ///
     /// The caller emits `UPDATE table SET ` before calling this, and
     /// ` WHERE pk = ?` afterwards.

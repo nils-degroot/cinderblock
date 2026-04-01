@@ -518,3 +518,194 @@ async fn read_action_with_optional_argument_none() {
 
     check!(results.len() == 2);
 }
+
+// ---------------------------------------------------------------------------
+// # Database-generated value tests
+// ---------------------------------------------------------------------------
+//
+// This second resource exercises `generated true` on the primary key
+// (autoincrement integer) and on a non-PK column (a `created_at` text
+// field with a server-side DEFAULT). These columns should be omitted from
+// INSERT and UPDATE statements, with their values coming from the database.
+
+resource! {
+    name = Test.Note;
+    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+
+    attributes {
+        note_id i64 {
+            primary_key true;
+            generated true;
+            writable false;
+        }
+        body String;
+        created_at String {
+            generated true;
+            writable false;
+        }
+    }
+
+    actions {
+        read all_notes;
+        create add_note;
+        update edit_note {
+            accept [body];
+        };
+        destroy remove_note;
+    }
+
+    extensions {
+        cinderblock_sqlx {
+            table = "notes";
+        };
+    }
+}
+
+/// Create a fresh in-memory SQLite database with the `notes` table that
+/// uses an autoincrement PK and a server-side DEFAULT for `created_at`.
+async fn setup_notes() -> (std::sync::Arc<cinderblock_core::Context>, SqliteDataLayer) {
+    let dl = SqliteDataLayer::new("sqlite::memory:")
+        .await
+        .expect("connect to in-memory SQLite");
+
+    sqlx::query(
+        "CREATE TABLE notes (
+            note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create notes table");
+
+    let mut ctx = cinderblock_core::Context::new();
+    ctx.register_data_layer(dl.clone());
+
+    (std::sync::Arc::new(ctx), dl)
+}
+
+#[tokio::test]
+async fn generated_pk_is_assigned_by_database() {
+    let (ctx, _dl) = setup_notes().await;
+
+    let note = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Hello world".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create note");
+
+    // The database should have assigned a positive autoincrement ID,
+    // not the Rust Default::default() value of 0.
+    check!(note.note_id > 0);
+    check!(note.body == "Hello world");
+    // created_at should be populated by the database DEFAULT, not empty.
+    check!(!note.created_at.is_empty());
+}
+
+#[tokio::test]
+async fn generated_pk_increments_across_inserts() {
+    let (ctx, _dl) = setup_notes().await;
+
+    let first = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "First".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create first note");
+
+    let second = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Second".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create second note");
+
+    check!(second.note_id > first.note_id);
+}
+
+#[tokio::test]
+async fn generated_column_not_overwritten_by_update() {
+    let (ctx, _dl) = setup_notes().await;
+
+    let created = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Original".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create note");
+
+    let updated = cinderblock_core::update::<Note, EditNote>(
+        &created.note_id,
+        EditNoteInput {
+            body: "Revised".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("update note");
+
+    check!(updated.body == "Revised");
+    // The generated columns should be unchanged after the update.
+    check!(updated.note_id == created.note_id);
+    check!(updated.created_at == created.created_at);
+}
+
+#[tokio::test]
+async fn read_back_generated_values_via_list() {
+    let (ctx, _dl) = setup_notes().await;
+
+    let created = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "List test".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create note");
+
+    let notes = cinderblock_core::read::<Note, AllNotes>(&ctx, &())
+        .await
+        .expect("list notes");
+
+    check!(notes.len() == 1);
+    check!(notes[0].note_id == created.note_id);
+    check!(notes[0].body == "List test");
+    check!(notes[0].created_at == created.created_at);
+}
+
+#[tokio::test]
+async fn destroy_generated_pk_resource() {
+    let (ctx, _dl) = setup_notes().await;
+
+    let created = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Doomed note".to_string(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create note");
+
+    let destroyed = cinderblock_core::destroy::<Note, RemoveNote>(&created.note_id, &ctx)
+        .await
+        .expect("destroy note");
+
+    check!(destroyed.note_id == created.note_id);
+    check!(destroyed.body == "Doomed note");
+
+    let remaining = cinderblock_core::read::<Note, AllNotes>(&ctx, &())
+        .await
+        .expect("list notes");
+
+    check!(remaining.is_empty());
+}
