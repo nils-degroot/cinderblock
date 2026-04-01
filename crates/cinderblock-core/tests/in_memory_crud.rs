@@ -281,3 +281,336 @@ async fn paged_read_total_pages_calculation() {
     let expected_pages = (result.meta.total as f64 / 4.0).ceil() as u32;
     check!(result.meta.total_pages == expected_pages);
 }
+
+// ---------------------------------------------------------------------------
+// # Relation Loading Tests
+// ---------------------------------------------------------------------------
+//
+// These tests verify the `relations` + `load` DSL features using the
+// in-memory data layer. We define separate resource types per test scenario
+// to avoid cross-contamination through the global in-memory store.
+
+// ## Belongs-to test resources
+
+resource! {
+    name = Test.Relations.BtAuthor;
+
+    attributes {
+        author_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        name String;
+    }
+
+    actions {
+        create add_bt_author;
+    }
+}
+
+resource! {
+    name = Test.Relations.BtPost;
+
+    attributes {
+        post_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        title String;
+        author_id Uuid;
+    }
+
+    relations {
+        belongs_to author {
+            ty BtAuthor;
+            source_attribute author_id;
+        };
+    }
+
+    actions {
+        // Plain read — no relations loaded, returns Vec<BtPost>
+        read all_bt_posts;
+
+        // Read with relations — returns Vec<AllBtPostsWithAuthorResponse>
+        read all_bt_posts_with_author {
+            load [author];
+        };
+
+        create add_bt_post;
+    }
+}
+
+// ## Has-many test resources
+
+resource! {
+    name = Test.Relations.HmWriter;
+
+    attributes {
+        writer_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        pen_name String;
+    }
+
+    actions {
+        create add_hm_writer;
+    }
+}
+
+resource! {
+    name = Test.Relations.HmArticle;
+
+    attributes {
+        article_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        headline String;
+        writer_id Uuid;
+    }
+
+    actions {
+        create add_hm_article;
+    }
+}
+
+resource! {
+    name = Test.Relations.HmWriterWithArticles;
+
+    attributes {
+        writer_with_articles_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        pen_name String;
+    }
+
+    relations {
+        has_many articles {
+            ty HmArticle;
+            source_attribute writer_id;
+        };
+    }
+
+    actions {
+        read all_hm_writers;
+
+        read all_hm_writers_with_articles {
+            load [articles];
+        };
+
+        create add_hm_writer_with_articles;
+    }
+}
+
+#[tokio::test]
+async fn belongs_to_relation_loads_related_resource() {
+    let ctx = fresh_ctx();
+
+    // Create an author
+    let author = cinderblock_core::create::<BtAuthor, AddBtAuthor>(
+        AddBtAuthorInput {
+            name: "Alice".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    // Create a post referencing the author
+    let post = cinderblock_core::create::<BtPost, AddBtPost>(
+        AddBtPostInput {
+            title: "Hello World".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    // Read posts with author loaded
+    let results = cinderblock_core::read::<BtPost, AllBtPostsWithAuthor>(&ctx, &())
+        .await
+        .expect("read posts with author");
+
+    // Find our specific post in the results
+    let our_result = results
+        .iter()
+        .find(|r| r.base.post_id == post.post_id)
+        .expect("our post should be in results");
+
+    check!(our_result.base.title == "Hello World");
+    check!(our_result.author.author_id == author.author_id);
+    check!(our_result.author.name == "Alice");
+}
+
+#[tokio::test]
+async fn belongs_to_response_serializes_with_flattened_base() {
+    let ctx = fresh_ctx();
+
+    let author = cinderblock_core::create::<BtAuthor, AddBtAuthor>(
+        AddBtAuthorInput {
+            name: "Bob".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    cinderblock_core::create::<BtPost, AddBtPost>(
+        AddBtPostInput {
+            title: "Serialization Test".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let results = cinderblock_core::read::<BtPost, AllBtPostsWithAuthor>(&ctx, &())
+        .await
+        .expect("read posts with author");
+
+    let our_result = results
+        .iter()
+        .find(|r| r.base.title == "Serialization Test")
+        .expect("our post should be in results");
+
+    // Verify that serialization flattens the base resource fields
+    let json = serde_json::to_value(our_result).expect("serialize to JSON");
+    check!(json["title"] == "Serialization Test");
+    check!(json["author_id"] == author.author_id.to_string());
+    // The author relation should be nested as an object
+    check!(json["author"]["name"] == "Bob");
+}
+
+#[tokio::test]
+async fn read_without_load_returns_plain_vec() {
+    let ctx = fresh_ctx();
+
+    let author = cinderblock_core::create::<BtAuthor, AddBtAuthor>(
+        AddBtAuthorInput {
+            name: "Charlie".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    cinderblock_core::create::<BtPost, AddBtPost>(
+        AddBtPostInput {
+            title: "No Load Test".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    // Reading without load returns Vec<BtPost>, not the wrapper
+    let results = cinderblock_core::read::<BtPost, AllBtPosts>(&ctx, &())
+        .await
+        .expect("read all posts");
+
+    let our_post = results
+        .iter()
+        .find(|p| p.title == "No Load Test")
+        .expect("our post should be in results");
+
+    check!(our_post.author_id == author.author_id);
+}
+
+#[tokio::test]
+async fn has_many_relation_loads_related_resources() {
+    let ctx = fresh_ctx();
+
+    // Create a writer (using the has_many-aware resource)
+    let writer = cinderblock_core::create::<HmWriterWithArticles, AddHmWriterWithArticles>(
+        AddHmWriterWithArticlesInput {
+            pen_name: "Diana".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    // Create articles referencing the writer's PK via the `writer_id` field
+    let article1 = cinderblock_core::create::<HmArticle, AddHmArticle>(
+        AddHmArticleInput {
+            headline: "Diana's First Article".into(),
+            writer_id: writer.writer_with_articles_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 1");
+
+    let article2 = cinderblock_core::create::<HmArticle, AddHmArticle>(
+        AddHmArticleInput {
+            headline: "Diana's Second Article".into(),
+            writer_id: writer.writer_with_articles_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 2");
+
+    // Read writers with articles loaded
+    let results =
+        cinderblock_core::read::<HmWriterWithArticles, AllHmWritersWithArticles>(&ctx, &())
+            .await
+            .expect("read writers with articles");
+
+    let our_result = results
+        .iter()
+        .find(|r| r.base.writer_with_articles_id == writer.writer_with_articles_id)
+        .expect("our writer should be in results");
+
+    check!(our_result.base.pen_name == "Diana");
+
+    // Should have at least our two articles
+    let our_article_ids: std::collections::HashSet<_> =
+        our_result.articles.iter().map(|a| a.article_id).collect();
+
+    check!(our_article_ids.contains(&article1.article_id));
+    check!(our_article_ids.contains(&article2.article_id));
+}
+
+#[tokio::test]
+async fn has_many_with_no_related_resources_returns_empty_vec() {
+    let ctx = fresh_ctx();
+
+    // Create a writer with no articles
+    let writer = cinderblock_core::create::<HmWriterWithArticles, AddHmWriterWithArticles>(
+        AddHmWriterWithArticlesInput {
+            pen_name: "EmptyWriter".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let results =
+        cinderblock_core::read::<HmWriterWithArticles, AllHmWritersWithArticles>(&ctx, &())
+            .await
+            .expect("read writers with articles");
+
+    let our_result = results
+        .iter()
+        .find(|r| r.base.writer_with_articles_id == writer.writer_with_articles_id)
+        .expect("our writer should be in results");
+
+    // No articles reference this specific writer_with_articles_id
+    let matching_articles: Vec<_> = our_result
+        .articles
+        .iter()
+        .filter(|a| a.writer_id == writer.writer_with_articles_id)
+        .collect();
+    check!(matching_articles.is_empty());
+}

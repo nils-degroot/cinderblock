@@ -948,3 +948,521 @@ async fn destroy_generated_pk_resource() {
 
     check!(remaining.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// # Relation Loading Tests (SQLx)
+// ---------------------------------------------------------------------------
+//
+// These tests verify the `relations` + `load` DSL features using the SQLx
+// data layer. Each test creates a fresh in-memory SQLite database with the
+// necessary tables, so tests are fully isolated.
+
+// ## Belongs-to test resources
+
+resource! {
+    name = Test.Sqlx.Author;
+    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+
+    attributes {
+        author_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        name String;
+    }
+
+    actions {
+        read all_authors;
+        create add_author;
+    }
+
+    extensions {
+        cinderblock_sqlx {
+            table = "authors";
+        };
+    }
+}
+
+resource! {
+    name = Test.Sqlx.Post;
+    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+
+    attributes {
+        post_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        title String;
+        author_id Uuid;
+    }
+
+    relations {
+        belongs_to author {
+            ty Author;
+            source_attribute author_id;
+        };
+    }
+
+    actions {
+        // Plain read — no relations loaded, returns Vec<Post>
+        read all_posts;
+
+        // Read with author loaded — returns Vec<AllPostsWithAuthorResponse>
+        read all_posts_with_author {
+            load [author];
+        };
+
+        create add_post;
+    }
+
+    extensions {
+        cinderblock_sqlx {
+            table = "posts";
+        };
+    }
+}
+
+// ## Has-many test resources
+
+resource! {
+    name = Test.Sqlx.Writer;
+    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+
+    attributes {
+        writer_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        pen_name String;
+    }
+
+    relations {
+        has_many articles {
+            ty Article;
+            source_attribute writer_id;
+        };
+    }
+
+    actions {
+        read all_writers;
+
+        read all_writers_with_articles {
+            load [articles];
+        };
+
+        create add_writer;
+    }
+
+    extensions {
+        cinderblock_sqlx {
+            table = "writers";
+        };
+    }
+}
+
+resource! {
+    name = Test.Sqlx.Article;
+    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+
+    attributes {
+        article_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        headline String;
+        writer_id Uuid;
+    }
+
+    actions {
+        read all_articles;
+        create add_article;
+    }
+
+    extensions {
+        cinderblock_sqlx {
+            table = "articles";
+        };
+    }
+}
+
+/// Create a fresh in-memory SQLite database with `authors` and `posts`
+/// tables for belongs_to relation tests.
+async fn setup_blog() -> (Arc<Context>, SqliteDataLayer) {
+    let dl = SqliteDataLayer::new("sqlite::memory:")
+        .await
+        .expect("connect to in-memory SQLite");
+
+    sqlx::query(
+        "CREATE TABLE authors (
+            author_id TEXT NOT NULL PRIMARY KEY,
+            name TEXT NOT NULL
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create authors table");
+
+    sqlx::query(
+        "CREATE TABLE posts (
+            post_id TEXT NOT NULL PRIMARY KEY,
+            title TEXT NOT NULL,
+            author_id TEXT NOT NULL REFERENCES authors(author_id)
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create posts table");
+
+    let mut ctx = Context::new();
+    ctx.register_data_layer(dl.clone());
+
+    (Arc::new(ctx), dl)
+}
+
+/// Create a fresh in-memory SQLite database with `writers` and `articles`
+/// tables for has_many relation tests.
+async fn setup_magazine() -> (Arc<Context>, SqliteDataLayer) {
+    let dl = SqliteDataLayer::new("sqlite::memory:")
+        .await
+        .expect("connect to in-memory SQLite");
+
+    sqlx::query(
+        "CREATE TABLE writers (
+            writer_id TEXT NOT NULL PRIMARY KEY,
+            pen_name TEXT NOT NULL
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create writers table");
+
+    sqlx::query(
+        "CREATE TABLE articles (
+            article_id TEXT NOT NULL PRIMARY KEY,
+            headline TEXT NOT NULL,
+            writer_id TEXT NOT NULL REFERENCES writers(writer_id)
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create articles table");
+
+    let mut ctx = Context::new();
+    ctx.register_data_layer(dl.clone());
+
+    (Arc::new(ctx), dl)
+}
+
+// ---------------------------------------------------------------------------
+// # Belongs-to relation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn belongs_to_relation_loads_related_resource() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let author = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "Alice".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    let post = cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Hello World".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
+        .await
+        .expect("read posts with author");
+
+    check!(results.len() == 1);
+    check!(results[0].base.post_id == post.post_id);
+    check!(results[0].base.title == "Hello World");
+    check!(results[0].author.author_id == author.author_id);
+    check!(results[0].author.name == "Alice");
+}
+
+#[tokio::test]
+async fn belongs_to_response_serializes_with_flattened_base() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let author = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "Bob".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Serialization Test".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
+        .await
+        .expect("read posts with author");
+
+    check!(results.len() == 1);
+
+    // Verify that serialization flattens the base resource fields
+    let json = serde_json::to_value(&results[0]).expect("serialize to JSON");
+    check!(json["title"] == "Serialization Test");
+    check!(json["author_id"] == author.author_id.to_string());
+    // The author relation should be nested as an object
+    check!(json["author"]["name"] == "Bob");
+}
+
+#[tokio::test]
+async fn read_without_load_returns_plain_vec() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let author = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "Charlie".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "No Load Test".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    // Reading without load returns Vec<Post>, not the wrapper
+    let results = cinderblock_core::read::<Post, AllPosts>(&ctx, &())
+        .await
+        .expect("read all posts");
+
+    check!(results.len() == 1);
+    check!(results[0].title == "No Load Test");
+    check!(results[0].author_id == author.author_id);
+}
+
+#[tokio::test]
+async fn belongs_to_with_multiple_posts_and_authors() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let alice = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "Alice".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Alice");
+
+    let bob = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "Bob".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Bob");
+
+    cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Alice's Post".into(),
+            author_id: alice.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Alice's post");
+
+    cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Bob's Post".into(),
+            author_id: bob.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Bob's post");
+
+    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
+        .await
+        .expect("read all posts with authors");
+
+    check!(results.len() == 2);
+
+    // Each post should have its correct author loaded
+    let alice_post = results.iter().find(|r| r.base.title == "Alice's Post")
+        .expect("Alice's post should be in results");
+    check!(alice_post.author.name == "Alice");
+
+    let bob_post = results.iter().find(|r| r.base.title == "Bob's Post")
+        .expect("Bob's post should be in results");
+    check!(bob_post.author.name == "Bob");
+}
+
+// ---------------------------------------------------------------------------
+// # Has-many relation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn has_many_relation_loads_related_resources() {
+    let (ctx, _dl) = setup_magazine().await;
+
+    let writer = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "Diana".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let article1 = cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "Diana's First Article".into(),
+            writer_id: writer.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 1");
+
+    let article2 = cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "Diana's Second Article".into(),
+            writer_id: writer.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 2");
+
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+        .await
+        .expect("read writers with articles");
+
+    check!(results.len() == 1);
+    check!(results[0].base.pen_name == "Diana");
+    check!(results[0].articles.len() == 2);
+
+    let article_ids: std::collections::HashSet<_> =
+        results[0].articles.iter().map(|a| a.article_id).collect();
+
+    check!(article_ids.contains(&article1.article_id));
+    check!(article_ids.contains(&article2.article_id));
+}
+
+#[tokio::test]
+async fn has_many_with_no_related_resources_returns_empty_vec() {
+    let (ctx, _dl) = setup_magazine().await;
+
+    let writer = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "Lonely Writer".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+        .await
+        .expect("read writers with articles");
+
+    check!(results.len() == 1);
+    check!(results[0].base.writer_id == writer.writer_id);
+    check!(results[0].articles.is_empty());
+}
+
+#[tokio::test]
+async fn has_many_with_multiple_writers() {
+    let (ctx, _dl) = setup_magazine().await;
+
+    let diana = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "Diana".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Diana");
+
+    let eve = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "Eve".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Eve");
+
+    // Diana has 2 articles
+    cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "Diana's Article".into(),
+            writer_id: diana.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Diana's article");
+
+    cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "Diana's Other Article".into(),
+            writer_id: diana.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Diana's other article");
+
+    // Eve has 1 article
+    cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "Eve's Article".into(),
+            writer_id: eve.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create Eve's article");
+
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+        .await
+        .expect("read all writers with articles");
+
+    check!(results.len() == 2);
+
+    let diana_result = results.iter().find(|r| r.base.pen_name == "Diana")
+        .expect("Diana should be in results");
+    check!(diana_result.articles.len() == 2);
+
+    let eve_result = results.iter().find(|r| r.base.pen_name == "Eve")
+        .expect("Eve should be in results");
+    check!(eve_result.articles.len() == 1);
+    check!(eve_result.articles[0].headline == "Eve's Article");
+}

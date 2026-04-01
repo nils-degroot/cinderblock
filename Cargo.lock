@@ -280,6 +280,7 @@ dependencies = [
  "cinderblock-core",
  "cinderblock-sqlx-macros",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "uuid",
