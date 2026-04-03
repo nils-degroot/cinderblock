@@ -49,6 +49,14 @@ resource! {
             filter { category == arg(category) };
         }
 
+        read ordered_by_label {
+            order { label asc; };
+        }
+
+        read ordered_by_label_desc {
+            order { label desc; };
+        }
+
         read paged_all {
             paged;
         }
@@ -60,6 +68,15 @@ resource! {
             paged {
                 default_per_page 3;
                 max_per_page 5;
+            };
+        }
+
+        read paged_ordered {
+            order { label desc; };
+
+            paged {
+                default_per_page 3;
+                max_per_page 10;
             };
         }
 
@@ -611,4 +628,154 @@ async fn has_many_with_no_related_resources_returns_empty_vec() {
         .filter(|a| a.writer_id == writer.writer_with_articles_id)
         .collect();
     check!(matching_articles.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// # Order Tests
+// ---------------------------------------------------------------------------
+
+resource! {
+    name = Test.InMemory.Ordered;
+
+    attributes {
+        id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        name String;
+        score u32;
+    }
+
+    actions {
+        read ordered_asc {
+            order { name asc; };
+        }
+
+        read ordered_desc {
+            order { name desc; };
+        }
+
+        read ordered_compound {
+            order { score desc; name asc; };
+        }
+
+        read paged_ordered_by_name {
+            order { name asc; };
+            paged { default_per_page 2; };
+        }
+
+        create add_ordered;
+    }
+}
+
+async fn seed_ordered_items(ctx: &Context) -> Vec<Ordered> {
+    let names = ["Charlie", "Alice", "Bob"];
+    let scores = [10u32, 30, 20];
+    let mut items = Vec::new();
+    for (name, score) in names.iter().zip(scores.iter()) {
+        let item = cinderblock_core::create::<Ordered, AddOrdered>(
+            AddOrderedInput {
+                name: name.to_string(),
+                score: *score,
+            },
+            ctx,
+        )
+        .await
+        .expect("seed ordered item");
+        items.push(item);
+    }
+    items
+}
+
+#[tokio::test]
+async fn order_asc_returns_sorted_results() {
+    let ctx = fresh_ctx();
+    seed_ordered_items(&ctx).await;
+
+    let results = cinderblock_core::read::<Ordered, OrderedAsc>(&ctx, &())
+        .await
+        .expect("read ordered asc");
+
+    let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+    check!(names.windows(2).all(|w| w[0] <= w[1]));
+}
+
+#[tokio::test]
+async fn order_desc_returns_reverse_sorted_results() {
+    let ctx = fresh_ctx();
+    seed_ordered_items(&ctx).await;
+
+    let results = cinderblock_core::read::<Ordered, OrderedDesc>(&ctx, &())
+        .await
+        .expect("read ordered desc");
+
+    let names: Vec<&str> = results.iter().map(|r| r.name.as_str()).collect();
+    check!(names.windows(2).all(|w| w[0] >= w[1]));
+}
+
+#[tokio::test]
+async fn compound_order_sorts_by_multiple_fields() {
+    let ctx = fresh_ctx();
+
+    // Create items with duplicate scores to exercise the secondary sort
+    for (name, score) in [("Zara", 10u32), ("Alice", 10), ("Bob", 20), ("Anna", 20)] {
+        cinderblock_core::create::<Ordered, AddOrdered>(
+            AddOrderedInput {
+                name: name.to_string(),
+                score,
+            },
+            &ctx,
+        )
+        .await
+        .expect("seed");
+    }
+
+    let results = cinderblock_core::read::<Ordered, OrderedCompound>(&ctx, &())
+        .await
+        .expect("read compound order");
+
+    // Primary: score DESC, Secondary: name ASC
+    // score=20 group first (desc), then score=10 group
+    // Within each group, name sorted ASC
+    let pairs: Vec<(u32, &str)> = results.iter().map(|r| (r.score, r.name.as_str())).collect();
+    for w in pairs.windows(2) {
+        let ok = w[0].0 > w[1].0 || (w[0].0 == w[1].0 && w[0].1 <= w[1].1);
+        check!(ok);
+    }
+}
+
+#[tokio::test]
+async fn paged_order_maintains_sort_across_pages() {
+    let ctx = fresh_ctx();
+    seed_ordered_items(&ctx).await;
+
+    let page1 = cinderblock_core::read::<Ordered, PagedOrderedByName>(
+        &ctx,
+        &PagedOrderedByNameArguments {
+            page: Some(1),
+            per_page: Some(2),
+        },
+    )
+    .await
+    .expect("page 1");
+
+    let page2 = cinderblock_core::read::<Ordered, PagedOrderedByName>(
+        &ctx,
+        &PagedOrderedByNameArguments {
+            page: Some(2),
+            per_page: Some(2),
+        },
+    )
+    .await
+    .expect("page 2");
+
+    // All items across both pages should be in ascending name order
+    let all_names: Vec<&str> = page1
+        .data
+        .iter()
+        .chain(page2.data.iter())
+        .map(|r| r.name.as_str())
+        .collect();
+    check!(all_names.windows(2).all(|w| w[0] <= w[1]));
 }

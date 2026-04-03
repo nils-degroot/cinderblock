@@ -70,7 +70,9 @@
 // }
 // ```
 
-use cinderblock_extension_api::{ExtensionMacroInput, ReadFilterValue, RelationDecl, RelationKind};
+use cinderblock_extension_api::{
+    ExtensionMacroInput, OrderDirection, ReadFilterValue, RelationDecl, RelationKind,
+};
 use syn::{Ident, LitStr, Type, parse::Parse};
 
 /// Checks whether a `syn::Type` is `Option<T>`.
@@ -323,6 +325,26 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 }
             }).collect();
 
+            // Build a static ORDER BY clause string at compile time.
+            // No bind parameters needed — column names and directions are literals.
+            let order_by_push = if action_read.orders.is_empty() {
+                quote::quote! {}
+            } else {
+                let clause = action_read.orders.iter()
+                    .map(|o| {
+                        let col = o.field.to_string();
+                        let dir = match o.direction {
+                            OrderDirection::Asc  => "ASC",
+                            OrderDirection::Desc => "DESC",
+                        };
+                        format!("{col} {dir}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let order_sql = format!(" ORDER BY {clause}");
+                quote::quote! { builder.push(#order_sql); }
+            };
+
             // Choose `SqlPagedReadAction` or `SqlReadAction` based on
             // whether the action is paged. The filter body is identical
             // for both; only the trait name differs.
@@ -570,6 +592,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 #(#filter_stmts)*
                                 let _ = filter_count; // suppress unused warning when no filters
 
+                                #order_by_push
+
                                 let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
                                     .build()
                                     .fetch_all(pool)
@@ -641,6 +665,12 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             let mut filter_count: u32 = 0;
                             #(#filter_stmts)*
                             filter_count > 0
+                        }
+
+                        fn bind_order(
+                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
+                        ) {
+                            #order_by_push
                         }
                     }
 
