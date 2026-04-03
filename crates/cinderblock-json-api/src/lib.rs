@@ -204,8 +204,8 @@ pub trait FieldSchema {
 macro_rules! impl_field_schema {
     ($ty:ty) => {
         impl $crate::FieldSchema for $ty {
-            fn field_schema(
-            ) -> $crate::utoipa::openapi::RefOr<$crate::utoipa::openapi::schema::Schema> {
+            fn field_schema()
+            -> $crate::utoipa::openapi::RefOr<$crate::utoipa::openapi::schema::Schema> {
                 <$ty as $crate::utoipa::PartialSchema>::schema()
             }
         }

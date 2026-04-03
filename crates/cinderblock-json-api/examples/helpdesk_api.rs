@@ -222,12 +222,8 @@ async fn main() -> cinderblock_core::Result<()> {
     println!("  curl http://localhost:3000/helpdesk/support/ticket/with-agent");
     println!();
     println!("  # Create a ticket");
-    println!(
-        "  curl -X POST http://localhost:3000/helpdesk/support/ticket/ \\"
-    );
-    println!(
-        "    -H 'Content-Type: application/json' \\"
-    );
+    println!("  curl -X POST http://localhost:3000/helpdesk/support/ticket/ \\");
+    println!("    -H 'Content-Type: application/json' \\");
     println!(
         "    -d '{{\"subject\": \"New ticket\", \"status\": \"Open\", \"agent_id\": \"{}\"}}'",
         alice.agent_id,

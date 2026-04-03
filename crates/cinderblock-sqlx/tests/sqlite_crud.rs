@@ -1199,14 +1199,10 @@ async fn belongs_to_relation_loads_related_resource() {
 async fn belongs_to_response_serializes_with_flattened_base() {
     let (ctx, _dl) = setup_blog().await;
 
-    let author = cinderblock_core::create::<Author, AddAuthor>(
-        AddAuthorInput {
-            name: "Bob".into(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create author");
+    let author =
+        cinderblock_core::create::<Author, AddAuthor>(AddAuthorInput { name: "Bob".into() }, &ctx)
+            .await
+            .expect("create author");
 
     cinderblock_core::create::<Post, AddPost>(
         AddPostInput {
@@ -1278,14 +1274,10 @@ async fn belongs_to_with_multiple_posts_and_authors() {
     .await
     .expect("create Alice");
 
-    let bob = cinderblock_core::create::<Author, AddAuthor>(
-        AddAuthorInput {
-            name: "Bob".into(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create Bob");
+    let bob =
+        cinderblock_core::create::<Author, AddAuthor>(AddAuthorInput { name: "Bob".into() }, &ctx)
+            .await
+            .expect("create Bob");
 
     cinderblock_core::create::<Post, AddPost>(
         AddPostInput {
@@ -1314,11 +1306,15 @@ async fn belongs_to_with_multiple_posts_and_authors() {
     check!(results.len() == 2);
 
     // Each post should have its correct author loaded
-    let alice_post = results.iter().find(|r| r.base.title == "Alice's Post")
+    let alice_post = results
+        .iter()
+        .find(|r| r.base.title == "Alice's Post")
         .expect("Alice's post should be in results");
     check!(alice_post.author.name == "Alice");
 
-    let bob_post = results.iter().find(|r| r.base.title == "Bob's Post")
+    let bob_post = results
+        .iter()
+        .find(|r| r.base.title == "Bob's Post")
         .expect("Bob's post should be in results");
     check!(bob_post.author.name == "Bob");
 }
@@ -1457,11 +1453,15 @@ async fn has_many_with_multiple_writers() {
 
     check!(results.len() == 2);
 
-    let diana_result = results.iter().find(|r| r.base.pen_name == "Diana")
+    let diana_result = results
+        .iter()
+        .find(|r| r.base.pen_name == "Diana")
         .expect("Diana should be in results");
     check!(diana_result.articles.len() == 2);
 
-    let eve_result = results.iter().find(|r| r.base.pen_name == "Eve")
+    let eve_result = results
+        .iter()
+        .find(|r| r.base.pen_name == "Eve")
         .expect("Eve should be in results");
     check!(eve_result.articles.len() == 1);
     check!(eve_result.articles[0].headline == "Eve's Article");

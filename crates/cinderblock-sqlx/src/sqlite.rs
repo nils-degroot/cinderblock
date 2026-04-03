@@ -176,4 +176,3 @@ where
         A::execute(&self.pool, args).await
     }
 }
-
