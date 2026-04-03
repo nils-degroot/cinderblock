@@ -52,6 +52,8 @@ This single declaration generates:
 - REST API endpoints via Axum with OpenAPI documentation
 - SQL persistence via SQLx with parameterized queries
 
+A complete ticketing system can be found at [cinderblock-ticketing](https://github.com/nils-degroot/cinderblock-ticketing)
+
 ## Key Concepts
 
 ### Named Actions
