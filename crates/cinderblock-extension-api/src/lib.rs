@@ -15,8 +15,8 @@
 //      config type
 
 use syn::{
-    braced, bracketed, parenthesized, parse::Parse, punctuated::Punctuated, ExprClosure, Ident,
-    LitBool, Path, Token, Type,
+    ExprClosure, Ident, LitBool, Path, Token, Type, braced, bracketed, parenthesized, parse::Parse,
+    punctuated::Punctuated,
 };
 
 // ---------------------------------------------------------------------------
@@ -829,9 +829,7 @@ impl Parse for ResourceMacroInput {
                         let ty = ty.ok_or_else(|| {
                             syn::Error::new(
                                 name.span(),
-                                format!(
-                                    "Relation `{name}` is missing required `ty` declaration."
-                                ),
+                                format!("Relation `{name}` is missing required `ty` declaration."),
                             )
                         })?;
 

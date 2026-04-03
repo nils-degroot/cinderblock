@@ -129,10 +129,7 @@ pub trait InMemoryPagedReadAction: ReadAction {
 /// read action, delegating to the appropriate filter logic. A single
 /// blanket `PerformRead` impl then dispatches to this trait.
 pub trait InMemoryPerformRead: ReadAction {
-    fn execute(
-        all: impl Iterator<Item = Self::Output>,
-        args: &Self::Arguments,
-    ) -> Self::Response;
+    fn execute(all: impl Iterator<Item = Self::Output>, args: &Self::Arguments) -> Self::Response;
 }
 
 /// Single `PerformRead` impl for `InMemoryDataLayer` that delegates to

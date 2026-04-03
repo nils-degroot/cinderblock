@@ -10,7 +10,7 @@
 
 use assert2::check;
 use cinderblock_core::{
-    resource, Context,
+    Context, resource,
     serde::{Deserialize, Serialize},
 };
 use uuid::Uuid;
@@ -455,9 +455,7 @@ async fn belongs_to_response_serializes_with_flattened_base() {
     let ctx = fresh_ctx();
 
     let author = cinderblock_core::create::<BtAuthor, AddBtAuthor>(
-        AddBtAuthorInput {
-            name: "Bob".into(),
-        },
+        AddBtAuthorInput { name: "Bob".into() },
         &ctx,
     )
     .await

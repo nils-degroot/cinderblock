@@ -37,7 +37,7 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
-use syn::{braced, parse::Parse, Ident, LitBool, LitStr, Token, Type};
+use syn::{Ident, LitBool, LitStr, Token, Type, braced, parse::Parse};
 
 /// Supported HTTP methods for route declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -222,8 +222,7 @@ impl Parse for JsonApiConfig {
 
             match key.to_string().as_str() {
                 "base_path" => {
-                    let (_, value) =
-                        cinderblock_extension_api::parse_attribute::<LitStr>(input)?;
+                    let (_, value) = cinderblock_extension_api::parse_attribute::<LitStr>(input)?;
                     config.base_path = Some(value);
                 }
                 "route" => {
@@ -367,11 +366,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
     for route in &config.routes {
         let action_name_str = route.action.to_string();
 
-        if !resource
-            .actions
-            .iter()
-            .any(|a| a.name == route.action)
-        {
+        if !resource.actions.iter().any(|a| a.name == route.action) {
             return syn::Error::new(
                 route.action.span(),
                 format!(
@@ -787,11 +782,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         // For each routed action that has an input struct (create and update
         // actions), generate `PartialSchema` + `ToSchema` impls. Only actions
         // that are actually routed get schemas.
-        let routed_action_names: HashSet<String> = config
-            .routes
-            .iter()
-            .map(|r| r.action.to_string())
-            .collect();
+        let routed_action_names: HashSet<String> =
+            config.routes.iter().map(|r| r.action.to_string()).collect();
 
         let input_schema_impls: Vec<_> = resource
             .actions
@@ -890,8 +882,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
                 // Only create/update actions have input structs.
                 match &action.kind {
-                    ResourceActionInputKind::Create { .. }
-                    | ResourceActionInputKind::Update(_) => {}
+                    ResourceActionInputKind::Create { .. } | ResourceActionInputKind::Update(_) => {
+                    }
                     _ => return None,
                 }
 

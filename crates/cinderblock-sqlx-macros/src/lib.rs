@@ -71,7 +71,7 @@
 // ```
 
 use cinderblock_extension_api::{ExtensionMacroInput, ReadFilterValue, RelationDecl, RelationKind};
-use syn::{parse::Parse, Ident, LitStr, Type};
+use syn::{Ident, LitStr, Type, parse::Parse};
 
 /// Checks whether a `syn::Type` is `Option<T>`.
 fn is_option_type(ty: &Type) -> bool {

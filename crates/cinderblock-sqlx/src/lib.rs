@@ -188,8 +188,10 @@ where
     /// This method handles the WHERE keyword internally so that optional
     /// arguments (which may or may not produce a clause) work correctly
     /// without the caller needing to predict the filter count.
-    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments)
-        -> bool;
+    fn bind_filters(
+        builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
+        args: &Self::Arguments,
+    ) -> bool;
 }
 
 /// Same contract as [`SqlReadAction`] but for paged read actions.
@@ -201,8 +203,10 @@ where
     Self::Output: SqlResource,
     Self::Arguments: cinderblock_core::Paged,
 {
-    fn bind_filters(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>, args: &Self::Arguments)
-        -> bool;
+    fn bind_filters(
+        builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
+        args: &Self::Arguments,
+    ) -> bool;
 }
 
 /// Execute a non-paged SQL read query using the filters from [`SqlReadAction`].
@@ -227,11 +231,8 @@ where
     ));
     A::bind_filters(&mut builder, args);
 
-    let rows: Vec<sqlx::sqlite::SqliteRow> = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .map_err(|e| {
+    let rows: Vec<sqlx::sqlite::SqliteRow> =
+        builder.build().fetch_all(pool).await.map_err(|e| {
             format!(
                 "read from `{}`: {e}",
                 <A::Output as SqlResource>::TABLE_NAME,
@@ -263,8 +264,7 @@ where
     let table = <A::Output as SqlResource>::TABLE_NAME;
 
     // COUNT query for total
-    let mut count_builder =
-        sqlx::QueryBuilder::new(format!("SELECT COUNT(*) FROM {} ", table));
+    let mut count_builder = sqlx::QueryBuilder::new(format!("SELECT COUNT(*) FROM {} ", table));
     A::bind_filters(&mut count_builder, args);
 
     let total: i64 = {
@@ -282,11 +282,10 @@ where
     let page = args.page();
     let per_page = args.per_page();
     let total_pages = total.div_ceil(per_page as u64) as u32;
-    let offset = ((page - 1) as u32) * per_page;
+    let offset = (page - 1) * per_page;
 
     // Data query with LIMIT/OFFSET
-    let mut builder =
-        sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", table));
+    let mut builder = sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", table));
     A::bind_filters(&mut builder, args);
     builder.push(format!(" LIMIT {} OFFSET {}", per_page, offset));
 

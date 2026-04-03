@@ -5,7 +5,7 @@ use cinderblock_extension_api::{
     Accept, ReadFilterValue, RelationDecl, RelationKind, ResourceActionInputKind,
     ResourceAttributeInput, ResourceMacroInput, UpdateChange,
 };
-use syn::{spanned::Spanned, Ident, Type};
+use syn::{Ident, Type, spanned::Spanned};
 
 /// Checks whether a `syn::Type` is `Option<T>`.
 ///
