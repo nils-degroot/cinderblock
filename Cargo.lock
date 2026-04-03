@@ -40,15 +40,38 @@ dependencies = [
 
 [[package]]
 name = "assert2"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d6c710e60d14b07d8f42d0e702b16120865eea39edb751e75cd6bf401d18f14"
+dependencies = [
+ "assert2-macros 0.3.16",
+ "diff",
+ "yansi",
+]
+
+[[package]]
+name = "assert2"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1f7e619706e24555d32d89b4446960bec3d085d1f488c659874b0929998bc28"
 dependencies = [
- "assert2-macros",
+ "assert2-macros 0.4.0",
  "diff",
  "terminal_size",
  "unicode-width",
  "yansi",
+]
+
+[[package]]
+name = "assert2-macros"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9008cbbba9e1d655538870b91fd93814bd82e6968f27788fc734375120ac6f57"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn",
 ]
 
 [[package]]
@@ -210,7 +233,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "cinderblock-core"
 version = "0.4.0"
 dependencies = [
- "assert2",
+ "assert2 0.4.0",
  "cinderblock-core-macros",
  "dirs2",
  "serde",
@@ -224,7 +247,7 @@ dependencies = [
 name = "cinderblock-core-macros"
 version = "0.4.0"
 dependencies = [
- "assert2",
+ "assert2 0.4.0",
  "cinderblock-extension-api",
  "convert_case",
  "darling",
@@ -237,7 +260,7 @@ dependencies = [
 name = "cinderblock-extension-api"
 version = "0.4.0"
 dependencies = [
- "assert2",
+ "assert2 0.4.0",
  "convert_case",
  "proc-macro2",
  "quote",
@@ -248,13 +271,16 @@ dependencies = [
 name = "cinderblock-json-api"
 version = "0.4.0"
 dependencies = [
+ "assert2 0.3.16",
  "axum",
  "cinderblock-core",
  "cinderblock-json-api-macros",
+ "http-body-util",
  "inventory",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "utoipa",
@@ -277,7 +303,7 @@ dependencies = [
 name = "cinderblock-sqlx"
 version = "0.4.0"
 dependencies = [
- "assert2",
+ "assert2 0.4.0",
  "cinderblock-core",
  "cinderblock-sqlx-macros",
  "serde",
@@ -291,7 +317,7 @@ dependencies = [
 name = "cinderblock-sqlx-macros"
 version = "0.4.0"
 dependencies = [
- "assert2",
+ "assert2 0.4.0",
  "cinderblock-extension-api",
  "convert_case",
  "proc-macro2",

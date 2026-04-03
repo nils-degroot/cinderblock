@@ -748,12 +748,20 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             .map(|attr| {
                 let field_name = attr.name.to_string();
                 let field_type = &attr.ty;
+                let is_optional = is_option_type(field_type);
+
+                let required_clause = if is_optional {
+                    quote::quote! {}
+                } else {
+                    quote::quote! { .required(#field_name) }
+                };
+
                 quote::quote! {
                     .property(
                         #field_name,
                         <#field_type as cinderblock_json_api::FieldSchema>::field_schema(),
                     )
-                    .required(#field_name)
+                    #required_clause
                 }
             })
             .collect();
@@ -815,12 +823,20 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     .iter()
                     .map(|(name, ty)| {
                         let name_str = name.to_string();
+                        let is_optional = is_option_type(ty);
+
+                        let required_clause = if is_optional {
+                            quote::quote! {}
+                        } else {
+                            quote::quote! { .required(#name_str) }
+                        };
+
                         quote::quote! {
                             .property(
                                 #name_str,
                                 <#ty as cinderblock_json_api::FieldSchema>::field_schema(),
                             )
-                            .required(#name_str)
+                            #required_clause
                         }
                     })
                     .collect();
