@@ -264,9 +264,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
-            // Get-actions delegate to `execute_sql_read_one` — no filters,
-            // no ordering, just a primary key lookup.
-            if action_read.get {
+            let has_loads = !action_read.load.is_empty();
+
+            // Get-actions without load delegate to `execute_sql_read_one` —
+            // no filters, no ordering, just a primary key lookup.
+            if action_read.get && !has_loads {
                 return quote::quote! {
                     impl cinderblock_sqlx::SqlPerformReadOne for #action_name {
                         async fn execute(
@@ -274,6 +276,195 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             args: &Self::Arguments,
                         ) -> Result<Self::Response, cinderblock_core::ReadError> {
                             cinderblock_sqlx::execute_sql_read_one::<#ident>(pool, args).await
+                        }
+                    }
+                };
+            }
+
+            // Get-actions with load: fetch base row by PK, then run
+            // batched relation queries, assemble wrapper.
+            if action_read.get && has_loads {
+                let loaded_relations: Vec<&RelationDecl> = action_read
+                    .load
+                    .iter()
+                    .map(|name| {
+                        relations
+                            .iter()
+                            .find(|r| r.name == *name)
+                            .expect("load reference validated during parsing")
+                    })
+                    .collect();
+
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+
+                let relation_loads = loaded_relations.iter().map(|rel| {
+                    let rel_ty = &rel.ty;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            let fk_attr = resource
+                                .attributes
+                                .iter()
+                                .find(|a| a.name == *source_attr)
+                                .expect("source_attribute must reference a declared attribute");
+                            let fk_type = &fk_attr.ty;
+
+                            quote::quote! {
+                                let #map_name: ::std::collections::HashMap<String, #rel_ty> = {
+                                    let fk_values: Vec<#fk_type> = vec![base.#source_attr.clone()];
+
+                                    let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
+                                    let related_pk_col = <#rel_ty as cinderblock_sqlx::SqlResource>::PRIMARY_KEY_COLUMN;
+
+                                    let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
+                                        format!("SELECT * FROM {} WHERE {} IN (", related_table, related_pk_col)
+                                    );
+
+                                    let mut sep = builder.separated(", ");
+                                    for val in &fk_values {
+                                        sep.push_bind(val.clone());
+                                    }
+                                    builder.push(")");
+
+                                    let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                        .build()
+                                        .fetch_all(pool)
+                                        .await
+                                        .map_err(|e| {
+                                            cinderblock_core::ReadError::DataLayer(
+                                                format!(
+                                                    "load belongs_to relation from `{}`: {e}",
+                                                    related_table,
+                                                ).into(),
+                                            )
+                                        })?;
+
+                                    let mut map = ::std::collections::HashMap::with_capacity(rows.len());
+                                    for row in &rows {
+                                        let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                            .map_err(cinderblock_core::ReadError::DataLayer)?;
+                                        use cinderblock_core::Resource;
+                                        map.insert(related.primary_key().to_string(), related);
+                                    }
+                                    map
+                                };
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            let source_attr_str = source_attr.to_string();
+                            let pk_type = &primary_key_attr.ty;
+
+                            quote::quote! {
+                                let #map_name: ::std::collections::HashMap<String, Vec<#rel_ty>> = {
+                                    let pk_values: Vec<#pk_type> = vec![{
+                                        use cinderblock_core::Resource;
+                                        base.primary_key().clone()
+                                    }];
+
+                                    let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
+
+                                    let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
+                                        format!("SELECT * FROM {} WHERE {} IN (", related_table, #source_attr_str)
+                                    );
+
+                                    let mut sep = builder.separated(", ");
+                                    for val in &pk_values {
+                                        sep.push_bind(val.clone());
+                                    }
+                                    builder.push(")");
+
+                                    let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                        .build()
+                                        .fetch_all(pool)
+                                        .await
+                                        .map_err(|e| {
+                                            cinderblock_core::ReadError::DataLayer(
+                                                format!(
+                                                    "load has_many relation from `{}`: {e}",
+                                                    related_table,
+                                                ).into(),
+                                            )
+                                        })?;
+
+                                    let mut map: ::std::collections::HashMap<String, Vec<#rel_ty>> =
+                                        ::std::collections::HashMap::new();
+                                    for row in &rows {
+                                        let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                            .map_err(cinderblock_core::ReadError::DataLayer)?;
+                                        let key = related.#source_attr.to_string();
+                                        map.entry(key).or_default().push(related);
+                                    }
+                                    map
+                                };
+                            }
+                        }
+                    }
+                });
+
+                let relation_field_inits = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            let rel_ty = &rel.ty;
+                            let rel_name_str = rel.name.to_string();
+                            quote::quote! {
+                                #rel_name: #map_name
+                                    .get(&base.#source_attr.to_string())
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        cinderblock_core::ReadError::DataLayer(
+                                            format!(
+                                                "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                                #rel_name_str,
+                                                ::std::any::type_name::<#rel_ty>(),
+                                                base.#source_attr,
+                                            ).into(),
+                                        )
+                                    })?
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            quote::quote! {
+                                #rel_name: {
+                                    use cinderblock_core::Resource;
+                                    #map_name
+                                        .get(&base.primary_key().to_string())
+                                        .cloned()
+                                        .unwrap_or_default()
+                                }
+                            }
+                        }
+                    }
+                });
+
+                return quote::quote! {
+                    impl cinderblock_sqlx::SqlPerformReadOne for #action_name {
+                        async fn execute(
+                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            args: &Self::Arguments,
+                        ) -> Result<Self::Response, cinderblock_core::ReadError> {
+                            use cinderblock_sqlx::sqlx::Row;
+
+                            let base = cinderblock_sqlx::execute_sql_read_one::<#ident>(pool, args).await?;
+
+                            #(#relation_loads)*
+
+                            Ok(#wrapper_name {
+                                #(#relation_field_inits,)*
+                                base,
+                            })
                         }
                     }
                 };

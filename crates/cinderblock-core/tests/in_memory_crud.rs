@@ -355,6 +355,12 @@ resource! {
             load [author];
         };
 
+        // Get single post with author loaded — returns OneBtPostWithAuthorResponse
+        read one_bt_post_with_author {
+            get;
+            load [author];
+        };
+
         create add_bt_post;
     }
 }
@@ -422,6 +428,12 @@ resource! {
             load [articles];
         };
 
+        // Get single writer with articles loaded — returns OneHmWriterWithArticlesResponse
+        read one_hm_writer_with_articles {
+            get;
+            load [articles];
+        };
+
         create add_hm_writer_with_articles;
     }
 }
@@ -465,6 +477,39 @@ async fn belongs_to_relation_loads_related_resource() {
     check!(our_result.base.title == "Hello World");
     check!(our_result.author.author_id == author.author_id);
     check!(our_result.author.name == "Alice");
+}
+
+#[tokio::test]
+async fn get_with_belongs_to_loads_related_resource() {
+    let ctx = fresh_ctx();
+
+    let author = cinderblock_core::create::<BtAuthor, AddBtAuthor>(
+        AddBtAuthorInput {
+            name: "GetAlice".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    let post = cinderblock_core::create::<BtPost, AddBtPost>(
+        AddBtPostInput {
+            title: "Get Hello World".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let result = cinderblock_core::read_one::<BtPost, OneBtPostWithAuthor>(&ctx, &post.post_id)
+        .await
+        .expect("get post with author");
+
+    check!(result.base.post_id == post.post_id);
+    check!(result.base.title == "Get Hello World");
+    check!(result.author.author_id == author.author_id);
+    check!(result.author.name == "GetAlice");
 }
 
 #[tokio::test]
@@ -623,6 +668,85 @@ async fn has_many_with_no_related_resources_returns_empty_vec() {
 
     // No articles reference this specific writer_with_articles_id
     let matching_articles: Vec<_> = our_result
+        .articles
+        .iter()
+        .filter(|a| a.writer_id == writer.writer_with_articles_id)
+        .collect();
+    check!(matching_articles.is_empty());
+}
+
+#[tokio::test]
+async fn get_with_has_many_loads_related_resources() {
+    let ctx = fresh_ctx();
+
+    let writer = cinderblock_core::create::<HmWriterWithArticles, AddHmWriterWithArticles>(
+        AddHmWriterWithArticlesInput {
+            pen_name: "GetDiana".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let article1 = cinderblock_core::create::<HmArticle, AddHmArticle>(
+        AddHmArticleInput {
+            headline: "GetDiana's First".into(),
+            writer_id: writer.writer_with_articles_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 1");
+
+    let article2 = cinderblock_core::create::<HmArticle, AddHmArticle>(
+        AddHmArticleInput {
+            headline: "GetDiana's Second".into(),
+            writer_id: writer.writer_with_articles_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 2");
+
+    let result = cinderblock_core::read_one::<HmWriterWithArticles, OneHmWriterWithArticles>(
+        &ctx,
+        &writer.writer_with_articles_id,
+    )
+    .await
+    .expect("get writer with articles");
+
+    check!(result.base.pen_name == "GetDiana");
+
+    let article_ids: std::collections::HashSet<_> =
+        result.articles.iter().map(|a| a.article_id).collect();
+
+    check!(article_ids.contains(&article1.article_id));
+    check!(article_ids.contains(&article2.article_id));
+}
+
+#[tokio::test]
+async fn get_with_has_many_no_related_returns_empty_vec() {
+    let ctx = fresh_ctx();
+
+    let writer = cinderblock_core::create::<HmWriterWithArticles, AddHmWriterWithArticles>(
+        AddHmWriterWithArticlesInput {
+            pen_name: "GetLoner".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let result = cinderblock_core::read_one::<HmWriterWithArticles, OneHmWriterWithArticles>(
+        &ctx,
+        &writer.writer_with_articles_id,
+    )
+    .await
+    .expect("get writer with articles");
+
+    check!(result.base.writer_with_articles_id == writer.writer_with_articles_id);
+
+    let matching_articles: Vec<_> = result
         .articles
         .iter()
         .filter(|a| a.writer_id == writer.writer_with_articles_id)

@@ -106,7 +106,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             // itself as Response. No Arguments struct, no filter codegen,
             // no in-memory data layer traits — the blanket
             // `PerformReadOne` impl on InMemoryDataLayer handles it.
-            if is_get {
+            if is_get && !has_loads {
                 return quote::quote! {
                     struct #action_name;
 
@@ -115,6 +115,162 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                         type Arguments = <#ident as cinderblock_core::Resource>::PrimaryKey;
                         type Response = #ident;
                     }
+                };
+            }
+
+            // # Get-action with relation loading
+            //
+            // When `get` is combined with `load [...]`, we generate a
+            // response wrapper and a `PerformReadOne` impl that fetches the
+            // base resource by primary key, then loads related resources
+            // and assembles the wrapper.
+            if is_get && has_loads {
+                let loaded_relations: Vec<&RelationDecl> = read_action
+                    .load
+                    .iter()
+                    .map(|name| {
+                        relations
+                            .iter()
+                            .find(|r| r.name == *name)
+                            .expect("load reference validated during parsing")
+                    })
+                    .collect();
+
+                let wrapper_name =
+                    Ident::new(&format!("{action_name}Response"), action.name.span());
+
+                let relation_fields = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let rel_ty = &rel.ty;
+                    match rel.kind {
+                        RelationKind::BelongsTo => quote::quote! {
+                            pub #rel_name: #rel_ty
+                        },
+                        RelationKind::HasMany => quote::quote! {
+                            pub #rel_name: Vec<#rel_ty>
+                        },
+                    }
+                });
+
+                let response_wrapper = quote::quote! {
+                    #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize)]
+                    pub struct #wrapper_name {
+                        #[serde(flatten)]
+                        pub base: #ident,
+                        #(#relation_fields),*
+                    }
+                };
+
+                let relation_loads = loaded_relations.iter().map(|rel| {
+                    let rel_ty = &rel.ty;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            quote::quote! {
+                                let all_related: Vec<#rel_ty> = dl.load_all::<#rel_ty>().await;
+                                let #map_name: ::std::collections::HashMap<String, #rel_ty> = all_related
+                                    .into_iter()
+                                    .map(|r| {
+                                        use cinderblock_core::Resource;
+                                        (r.primary_key().to_string(), r)
+                                    })
+                                    .collect();
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            quote::quote! {
+                                let all_related: Vec<#rel_ty> = dl.load_all::<#rel_ty>().await;
+                                let mut #map_name: ::std::collections::HashMap<String, Vec<#rel_ty>> =
+                                    ::std::collections::HashMap::new();
+                                for r in all_related {
+                                    let key = r.#source_attr.to_string();
+                                    #map_name.entry(key).or_default().push(r);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let relation_field_inits = loaded_relations.iter().map(|rel| {
+                    let rel_name = &rel.name;
+                    let source_attr = &rel.source_attribute;
+                    let map_name = Ident::new(
+                        &format!("{}_map", rel.name),
+                        rel.name.span(),
+                    );
+
+                    match rel.kind {
+                        RelationKind::BelongsTo => {
+                            let rel_ty = &rel.ty;
+                            let rel_name_str = rel.name.to_string();
+                            quote::quote! {
+                                #rel_name: #map_name
+                                    .get(&base.#source_attr.to_string())
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        cinderblock_core::ReadError::DataLayer(
+                                            format!(
+                                                "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                                #rel_name_str,
+                                                ::std::any::type_name::<#rel_ty>(),
+                                                base.#source_attr,
+                                            ).into(),
+                                        )
+                                    })?
+                            }
+                        }
+                        RelationKind::HasMany => {
+                            quote::quote! {
+                                #rel_name: {
+                                    use cinderblock_core::Resource;
+                                    #map_name
+                                        .get(&base.primary_key().to_string())
+                                        .cloned()
+                                        .unwrap_or_default()
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let data_layer_block = if data_layer_specified {
+                    quote::quote! { }
+                } else {
+                    quote::quote! {
+                        impl cinderblock_core::PerformReadOne<#action_name> for cinderblock_core::data_layer::in_memory::InMemoryDataLayer {
+                            async fn read_one(&self, args: &<#action_name as cinderblock_core::ReadAction>::Arguments) -> Result<<#action_name as cinderblock_core::ReadAction>::Response, cinderblock_core::ReadError> {
+                                let dl = self;
+
+                                let base = <Self as cinderblock_core::data_layer::DataLayer<#ident>>::read(dl, args).await?;
+
+                                #(#relation_loads)*
+
+                                Ok(#wrapper_name {
+                                    #(#relation_field_inits,)*
+                                    base,
+                                })
+                            }
+                        }
+                    }
+                };
+
+                return quote::quote! {
+                    #response_wrapper
+
+                    pub struct #action_name;
+
+                    impl cinderblock_core::ReadAction for #action_name {
+                        type Output = #ident;
+                        type Arguments = <#ident as cinderblock_core::Resource>::PrimaryKey;
+                        type Response = #wrapper_name;
+                    }
+
+                    #data_layer_block
                 };
             }
 
