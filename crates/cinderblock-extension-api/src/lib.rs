@@ -110,6 +110,7 @@ pub enum ResourceActionInputKind {
 pub struct ActionRead {
     pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
+    pub orders: Vec<OrderClause>,
     pub paged: Option<PagedConfig>,
     /// Relations to eagerly load for this read action.
     ///
@@ -179,6 +180,23 @@ impl Parse for ReadFilterOperation {
             ))
         }
     }
+}
+
+/// The sort direction for an order clause.
+#[derive(Debug)]
+pub enum OrderDirection {
+    Asc,
+    Desc,
+}
+
+/// A single ordering clause declared in a read action's `order { ... }` block.
+///
+/// DSL syntax: `order { field_name desc; field_name2; };`
+/// When the direction is omitted, `Asc` is used as the default.
+#[derive(Debug)]
+pub struct OrderClause {
+    pub field: Ident,
+    pub direction: OrderDirection,
 }
 
 impl Parse for ReadArgument {
@@ -359,6 +377,7 @@ impl Parse for ResourceActionInput {
                     ResourceActionInputKind::Read(ActionRead {
                         arguments: vec![],
                         filters: vec![],
+                        orders: vec![],
                         paged: None,
                         load: vec![],
                     })
@@ -369,6 +388,7 @@ impl Parse for ResourceActionInput {
                     let mut action = ActionRead {
                         arguments: vec![],
                         filters: vec![],
+                        orders: vec![],
                         paged: None,
                         load: vec![],
                     };
@@ -490,6 +510,38 @@ impl Parse for ResourceActionInput {
                                     .parse_terminated(Ident::parse, Token![,])?
                                     .into_iter()
                                     .collect();
+
+                                let _: Token![;] = content.parse()?;
+                            }
+                            "order" => {
+                                let order_content;
+                                braced!(order_content in content);
+
+                                while !order_content.is_empty() {
+                                    let field: Ident = order_content.parse()?;
+
+                                    let direction = if order_content.peek(Token![;]) {
+                                        OrderDirection::Asc
+                                    } else {
+                                        let dir_ident: Ident = order_content.parse()?;
+                                        match dir_ident.to_string().as_str() {
+                                            "asc" => OrderDirection::Asc,
+                                            "desc" => OrderDirection::Desc,
+                                            got => {
+                                                return Err(syn::Error::new(
+                                                    dir_ident.span(),
+                                                    format!(
+                                                        "Unexpected order direction, got `{got}`. \
+                                                         Expected `asc` or `desc`."
+                                                    ),
+                                                ));
+                                            }
+                                        }
+                                    };
+
+                                    let _: Token![;] = order_content.parse()?;
+                                    action.orders.push(OrderClause { field, direction });
+                                }
 
                                 let _: Token![;] = content.parse()?;
                             }
@@ -913,6 +965,19 @@ impl Parse for ResourceMacroInput {
                                 "Read action `{}` loads undeclared relation `{load_name}`. \
                                  Declare it in the `relations {{ ... }}` block.",
                                 action.name,
+                            ),
+                        ));
+                    }
+                }
+
+                for order in &read.orders {
+                    if !attributes.iter().any(|a| a.name == order.field) {
+                        return Err(syn::Error::new(
+                            order.field.span(),
+                            format!(
+                                "Read action `{}` orders by undeclared attribute `{}`. \
+                                 Declare it in the `attributes {{ ... }}` block.",
+                                action.name, order.field,
                             ),
                         ));
                     }
@@ -2151,5 +2216,177 @@ mod tests {
         assert!(let ResourceActionInputKind::Read(read_with_author) = &input.actions[1].kind);
         check!(read_with_author.load.len() == 1);
         check!(read_with_author.load[0] == "author");
+    }
+
+    // -----------------------------------------------------------------------
+    // Order keyword tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_action_with_single_order_desc() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+                created_at String;
+            }
+
+            actions {
+                read recent {
+                    order { created_at desc; };
+                };
+            }
+        });
+
+        check!(input.actions.len() == 1);
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.orders.len() == 1);
+        check!(read.orders[0].field == "created_at");
+        check!(let OrderDirection::Desc = read.orders[0].direction);
+    }
+
+    #[test]
+    fn read_action_with_single_order_asc() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+                title String;
+            }
+
+            actions {
+                read alphabetical {
+                    order { title asc; };
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.orders.len() == 1);
+        check!(read.orders[0].field == "title");
+        check!(let OrderDirection::Asc = read.orders[0].direction);
+    }
+
+    #[test]
+    fn read_action_with_order_default_direction() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+                title String;
+            }
+
+            actions {
+                read alphabetical {
+                    order { title; };
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.orders.len() == 1);
+        check!(read.orders[0].field == "title");
+        check!(let OrderDirection::Asc = read.orders[0].direction);
+    }
+
+    #[test]
+    fn read_action_with_compound_order() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+                priority String;
+                title String;
+            }
+
+            actions {
+                read sorted {
+                    order { priority desc; title asc; };
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.orders.len() == 2);
+        check!(read.orders[0].field == "priority");
+        check!(let OrderDirection::Desc = read.orders[0].direction);
+        check!(read.orders[1].field == "title");
+        check!(let OrderDirection::Asc = read.orders[1].direction);
+    }
+
+    #[test]
+    fn read_action_with_order_and_filter_and_paged() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+                title String;
+                done bool;
+            }
+
+            actions {
+                read open_sorted {
+                    filter { done == false };
+                    order { title asc; };
+                    paged;
+                };
+            }
+        });
+
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.filters.len() == 1);
+        check!(read.orders.len() == 1);
+        check!(read.paged.is_some());
+    }
+
+    #[test]
+    fn read_action_without_order_has_empty_orders() {
+        assert!(let Ok(action) = syn::parse2::<ResourceActionInput>(quote! {
+            read all;
+        }));
+
+        assert!(let ResourceActionInputKind::Read(read) = &action.kind);
+        check!(read.orders.is_empty());
+    }
+
+    #[test]
+    fn order_with_invalid_direction_produces_error() {
+        let result = syn::parse2::<ResourceActionInput>(quote! {
+            read broken {
+                order { title backwards; };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("Unexpected order direction"));
+        check!(msg.contains("backwards"));
+    }
+
+    #[test]
+    fn order_referencing_undeclared_attribute_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Ticket;
+
+            attributes {
+                id String;
+            }
+
+            actions {
+                read sorted {
+                    order { nonexistent desc; };
+                };
+            }
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("undeclared attribute"));
+        check!(msg.contains("nonexistent"));
     }
 }

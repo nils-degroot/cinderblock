@@ -194,6 +194,11 @@ where
         builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
         args: &Self::Arguments,
     ) -> bool;
+
+    /// Push a static `ORDER BY` clause into the query builder.
+    ///
+    /// When the read action has no `order` clauses, this is a no-op.
+    fn bind_order(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>);
 }
 
 /// Same contract as [`SqlReadAction`] but for paged read actions.
@@ -209,6 +214,8 @@ where
         builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>,
         args: &Self::Arguments,
     ) -> bool;
+
+    fn bind_order(builder: &mut sqlx::QueryBuilder<'_, sqlx::Sqlite>);
 }
 
 /// Execute a non-paged SQL read query using the filters from [`SqlReadAction`].
@@ -232,6 +239,7 @@ where
         <A::Output as SqlResource>::TABLE_NAME,
     ));
     A::bind_filters(&mut builder, args);
+    A::bind_order(&mut builder);
 
     let rows: Vec<sqlx::sqlite::SqliteRow> =
         builder.build().fetch_all(pool).await.map_err(|e| {
@@ -301,6 +309,7 @@ where
     // Data query with LIMIT/OFFSET
     let mut builder = sqlx::QueryBuilder::new(format!("SELECT * FROM {} ", table));
     A::bind_filters(&mut builder, args);
+    A::bind_order(&mut builder);
     builder.push(format!(" LIMIT {} OFFSET {}", per_page, offset));
 
     let rows: Vec<sqlx::sqlite::SqliteRow> =

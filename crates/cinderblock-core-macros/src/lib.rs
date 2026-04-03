@@ -2,7 +2,7 @@ use core::iter::Iterator;
 use std::collections::{HashMap, HashSet};
 
 use cinderblock_extension_api::{
-    Accept, ReadFilterValue, RelationDecl, RelationKind, ResourceActionInputKind,
+    Accept, OrderDirection, ReadFilterValue, RelationDecl, RelationKind, ResourceActionInputKind,
     ResourceAttributeInput, ResourceMacroInput, UpdateChange,
 };
 use syn::{Ident, Type, spanned::Spanned};
@@ -284,6 +284,38 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 }).collect::<Vec<_>>()
             };
 
+            // # Order comparator codegen helper
+            //
+            // Builds a sort_by closure body from the read action's `order`
+            // clauses. Each clause becomes a `.cmp()` call on the field,
+            // chained via `.then_with()` for compound ordering.
+            //
+            // Returns `None` when there are no order clauses, so callers
+            // can skip emitting sort code entirely.
+            let build_order_sort = |read_action: &cinderblock_extension_api::ActionRead| -> Option<proc_macro2::TokenStream> {
+                if read_action.orders.is_empty() {
+                    return None;
+                }
+
+                let mut clauses = read_action.orders.iter();
+                let first = clauses.next().unwrap();
+                let first_field = &first.field;
+                let first_cmp = match first.direction {
+                    OrderDirection::Asc  => quote::quote! { a.#first_field.cmp(&b.#first_field) },
+                    OrderDirection::Desc => quote::quote! { b.#first_field.cmp(&a.#first_field) },
+                };
+
+                let rest: Vec<_> = clauses.map(|clause| {
+                    let field = &clause.field;
+                    match clause.direction {
+                        OrderDirection::Asc  => quote::quote! { .then_with(|| a.#field.cmp(&b.#field)) },
+                        OrderDirection::Desc => quote::quote! { .then_with(|| b.#field.cmp(&a.#field)) },
+                    }
+                }).collect();
+
+                Some(quote::quote! { #first_cmp #(#rest)* })
+            };
+
             // # In-memory data layer codegen
             //
             // When no custom data layer is specified, generate the
@@ -300,9 +332,14 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 // For actions with `load`, we generate a direct `PerformRead`
                 // impl on `InMemoryDataLayer` (skipping the blanket) that:
                 //   1. Reads all base rows and applies filters
-                //   2. Loads each related resource type from the store
-                //   3. Assembles the response wrapper for each base row
+                //   2. Sorts results according to `order` clauses
+                //   3. Loads each related resource type from the store
+                //   4. Assembles the response wrapper for each base row
                 let filters = build_filters(read_action);
+                let order_sort = build_order_sort(read_action);
+                let order_sort_block = order_sort.as_ref().map(|cmp_body| {
+                    quote::quote! { base_rows.sort_by(|a, b| #cmp_body); }
+                }).unwrap_or_default();
 
                 // Generate the relation loading code. For each loaded relation:
                 //
@@ -410,10 +447,13 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             let dl = self;
 
                             // Step 1: Load and filter base rows
-                            let base_rows: Vec<#ident> = dl.load_all::<#ident>().await
+                            let mut base_rows: Vec<#ident> = dl.load_all::<#ident>().await
                                 .into_iter()
                                 .filter(|row| { #(#filters)* true })
                                 .collect();
+
+                            // Step 1b: Sort base rows if order clauses declared
+                            #order_sort_block
 
                             // Step 2: Load related resources
                             #(#relation_loads)*
@@ -434,8 +474,11 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                     }
                 }
             } else if is_paged {
-                // # Filter codegen for InMemoryPagedReadAction
                 let filters = build_filters(read_action);
+                let order_sort = build_order_sort(read_action);
+                let order_sort_block = order_sort.as_ref().map(|cmp_body| {
+                    quote::quote! { filtered.sort_by(|a, b| #cmp_body); }
+                }).unwrap_or_default();
 
                 quote::quote! {
                     impl cinderblock_core::data_layer::in_memory::InMemoryPagedReadAction for #action_name {
@@ -451,9 +494,11 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                         ) -> Self::Response {
                             use cinderblock_core::Paged;
 
-                            let filtered: Vec<Self::Output> = all
+                            let mut filtered: Vec<Self::Output> = all
                                 .filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryPagedReadAction>::filter(row, args))
                                 .collect();
+
+                            #order_sort_block
 
                             let total = filtered.len() as u64;
                             let page = args.page();
@@ -491,6 +536,22 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 // to `true`). This lets optional arguments act as "filter if
                 // provided" semantics.
                 let filters = build_filters(read_action);
+                let order_sort = build_order_sort(read_action);
+
+                let execute_body = if let Some(cmp_body) = order_sort {
+                    quote::quote! {
+                        let mut results: Vec<Self::Output> = all
+                            .filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryReadAction>::filter(row, args))
+                            .collect();
+                        results.sort_by(|a, b| #cmp_body);
+                        results
+                    }
+                } else {
+                    quote::quote! {
+                        all.filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryReadAction>::filter(row, args))
+                            .collect()
+                    }
+                };
 
                 quote::quote! {
                     impl cinderblock_core::data_layer::in_memory::InMemoryReadAction for #action_name {
@@ -504,8 +565,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             all: impl Iterator<Item = Self::Output>,
                             args: &Self::Arguments,
                         ) -> Self::Response {
-                            all.filter(|row| <Self as cinderblock_core::data_layer::in_memory::InMemoryReadAction>::filter(row, args))
-                                .collect()
+                            #execute_body
                         }
                     }
                 }

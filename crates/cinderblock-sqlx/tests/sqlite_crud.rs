@@ -82,6 +82,26 @@ resource! {
             };
         }
 
+        read ordered_by_title {
+            order { title asc; };
+        }
+
+        read ordered_by_title_desc {
+            order { title desc; };
+        }
+
+        read ordered_by_priority_and_title {
+            order { priority desc; title asc; };
+        }
+
+        read paged_ordered_by_title {
+            order { title asc; };
+            paged {
+                default_per_page 3;
+                max_per_page 10;
+            };
+        }
+
         create add;
 
         update complete {
@@ -1465,4 +1485,147 @@ async fn has_many_with_multiple_writers() {
         .expect("Eve should be in results");
     check!(eve_result.articles.len() == 1);
     check!(eve_result.articles[0].headline == "Eve's Article");
+}
+
+// ---------------------------------------------------------------------------
+// # Order Tests (SQLx)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn order_asc_returns_sorted_results() {
+    let (ctx, _dl) = setup().await;
+
+    for title in ["Charlie", "Alice", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let results = cinderblock_core::read::<Task, OrderedByTitle>(&ctx, &())
+        .await
+        .expect("read ordered by title asc");
+
+    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
+    check!(titles == vec!["Alice", "Bob", "Charlie"]);
+}
+
+#[tokio::test]
+async fn order_desc_returns_reverse_sorted_results() {
+    let (ctx, _dl) = setup().await;
+
+    for title in ["Charlie", "Alice", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let results = cinderblock_core::read::<Task, OrderedByTitleDesc>(&ctx, &())
+        .await
+        .expect("read ordered by title desc");
+
+    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
+    check!(titles == vec!["Charlie", "Bob", "Alice"]);
+}
+
+#[tokio::test]
+async fn compound_order_sorts_by_multiple_fields() {
+    let (ctx, _dl) = setup().await;
+
+    for (title, priority) in [
+        ("Zara", Priority::High),
+        ("Alice", Priority::High),
+        ("Bob", Priority::Low),
+        ("Anna", Priority::Low),
+    ] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority,
+                done: false,
+            },
+            &ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let results = cinderblock_core::read::<Task, OrderedByPriorityAndTitle>(&ctx, &())
+        .await
+        .expect("read compound order");
+
+    // Primary: priority DESC (text sort: Low > High alphabetically in SQLite)
+    // Actually in SQLite, TEXT ordering: "High" < "Low" < "Medium" alphabetically
+    // So DESC would be: Medium > Low > High
+    // But we only have High and Low here, so DESC: Low > High
+    // Secondary: title ASC within each group
+
+    // Low group first (desc), then High group
+    // Low group: Anna, Bob (ASC)
+    // High group: Alice, Zara (ASC)
+    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
+    check!(titles == vec!["Anna", "Bob", "Alice", "Zara"]);
+}
+
+#[tokio::test]
+async fn paged_order_maintains_sort_across_pages() {
+    let (ctx, _dl) = setup().await;
+
+    for title in ["Echo", "Charlie", "Alice", "Delta", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let page1 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
+        &ctx,
+        &PagedOrderedByTitleArguments {
+            page: Some(1),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 1");
+
+    let page2 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
+        &ctx,
+        &PagedOrderedByTitleArguments {
+            page: Some(2),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 2");
+
+    check!(page1.data.len() == 3);
+    check!(page2.data.len() == 2);
+    check!(page1.meta.total == 5);
+
+    let all_titles: Vec<&str> = page1
+        .data
+        .iter()
+        .chain(page2.data.iter())
+        .map(|t| t.title.as_str())
+        .collect();
+    check!(all_titles == vec!["Alice", "Bob", "Charlie", "Delta", "Echo"]);
 }
