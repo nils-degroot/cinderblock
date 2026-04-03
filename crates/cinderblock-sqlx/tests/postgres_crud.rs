@@ -1,11 +1,3 @@
-/// # SQLite Data Layer Integration Tests
-///
-/// End-to-end tests that verify the full pipeline:
-///   resource! macro → cinderblock_sqlx extension codegen → SqliteDataLayer CRUD
-///
-/// Each test creates a fresh in-memory SQLite database, applies the schema,
-/// registers the data layer on a Context, and exercises the cinderblock_core CRUD
-/// functions against a real database.
 use std::sync::Arc;
 
 use assert2::{assert, check};
@@ -13,15 +5,15 @@ use cinderblock_core::{
     Context, resource,
     serde::{Deserialize, Serialize},
 };
-use cinderblock_sqlx::sqlite::SqliteDataLayer;
+use cinderblock_sqlx::postgres::PostgresDataLayer;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // # Test Resource Definition
 // ---------------------------------------------------------------------------
 
-// A custom enum stored as TEXT in SQLite. sqlx's derive macro handles the
-// string conversion — variant names are used as-is (e.g., "Low", "Medium").
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, sqlx::Type)]
 enum Priority {
     #[default]
@@ -32,7 +24,7 @@ enum Priority {
 
 resource! {
     name = Test.Task;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         task_id Uuid {
@@ -124,23 +116,42 @@ resource! {
 // # Test Setup
 // ---------------------------------------------------------------------------
 
-/// Create a fresh in-memory SQLite database with the `tasks` table,
-/// register the data layer on a new Context, and return both.
-///
-/// Each call produces an isolated database — tests don't interfere with
-/// each other even when run in parallel.
-async fn setup() -> (Arc<Context>, SqliteDataLayer) {
-    let dl = SqliteDataLayer::new("sqlite::memory:")
-        .await
-        .expect("connect to in-memory SQLite");
+struct PgTestDb {
+    dl: PostgresDataLayer,
+    ctx: Arc<Context>,
+    _container: testcontainers::ContainerAsync<Postgres>,
+}
 
-    // Create the table schema matching our resource attributes.
-    // Uuid → TEXT, String → TEXT, Priority (sqlx::Type enum) → TEXT, bool → BOOLEAN.
+async fn start_postgres() -> PgTestDb {
+    let container = Postgres::default()
+        .with_db_name("cinderblock_test")
+        .with_user("test")
+        .with_password("test")
+        .start()
+        .await
+        .expect("start PostgreSQL container");
+
+    let host = container.get_host().await.expect("get host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get mapped port");
+
+    let url = format!("postgres://test:test@{host}:{port}/cinderblock_test");
+    let dl = PostgresDataLayer::new(&url)
+        .await
+        .expect("connect to PostgreSQL");
+
+    sqlx::query("CREATE TYPE priority AS ENUM ('Low', 'Medium', 'High')")
+        .execute(dl.pool())
+        .await
+        .expect("create priority enum type");
+
     sqlx::query(
         "CREATE TABLE tasks (
-            task_id TEXT NOT NULL PRIMARY KEY,
+            task_id UUID NOT NULL PRIMARY KEY,
             title TEXT NOT NULL,
-            priority TEXT NOT NULL,
+            priority priority NOT NULL,
             done BOOLEAN NOT NULL
         )",
     )
@@ -151,16 +162,21 @@ async fn setup() -> (Arc<Context>, SqliteDataLayer) {
     let mut ctx = Context::new();
     ctx.register_data_layer(dl.clone());
 
-    (Arc::new(ctx), dl)
+    PgTestDb {
+        dl,
+        ctx: Arc::new(ctx),
+        _container: container,
+    }
 }
 
 // ---------------------------------------------------------------------------
-// # Tests
+// # CRUD Tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn create_and_read_back_via_list() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     let created = cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -168,12 +184,12 @@ async fn create_and_read_back_via_list() {
             priority: Priority::High,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task");
 
-    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+    let tasks = cinderblock_core::read::<Task, All>(&db.ctx, &())
         .await
         .expect("list tasks");
 
@@ -185,8 +201,9 @@ async fn create_and_read_back_via_list() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn read_by_primary_key() {
-    let (ctx, dl) = setup().await;
+    let db = start_postgres().await;
 
     let created = cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -194,13 +211,12 @@ async fn read_by_primary_key() {
             priority: Priority::Low,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task");
 
-    // Read directly via the data layer trait (through the context).
-    let fetched = cinderblock_core::data_layer::DataLayer::<Task>::read(&dl, &created.task_id)
+    let fetched = cinderblock_core::data_layer::DataLayer::<Task>::read(&db.dl, &created.task_id)
         .await
         .expect("read task by PK");
 
@@ -211,8 +227,9 @@ async fn read_by_primary_key() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn update_modifies_row() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     let created = cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -220,16 +237,15 @@ async fn update_modifies_row() {
             priority: Priority::Medium,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task");
 
     check!(created.done == false);
 
-    // The `complete` action sets `done = true` via its change_ref closure.
     let updated =
-        cinderblock_core::update::<Task, Complete>(&created.task_id, CompleteInput {}, &ctx)
+        cinderblock_core::update::<Task, Complete>(&created.task_id, CompleteInput {}, &db.ctx)
             .await
             .expect("update task");
 
@@ -237,8 +253,7 @@ async fn update_modifies_row() {
     check!(updated.task_id == created.task_id);
     check!(updated.title == "Incomplete task");
 
-    // Verify the change persisted in the database.
-    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+    let tasks = cinderblock_core::read::<Task, All>(&db.ctx, &())
         .await
         .expect("list tasks");
 
@@ -247,8 +262,9 @@ async fn update_modifies_row() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn list_returns_all_resources() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     for i in 0..3 {
         cinderblock_core::create::<Task, Add>(
@@ -257,28 +273,27 @@ async fn list_returns_all_resources() {
                 priority: Priority::Low,
                 done: false,
             },
-            &ctx,
+            &db.ctx,
         )
         .await
         .expect("create task");
     }
 
-    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+    let tasks = cinderblock_core::read::<Task, All>(&db.ctx, &())
         .await
         .expect("list tasks");
 
     check!(tasks.len() == 3);
 
-    // Verify all titles are present (order is not guaranteed by SQL without
-    // ORDER BY, but SQLite typically returns insertion order).
     let mut titles: Vec<String> = tasks.iter().map(|t| t.title.clone()).collect();
     titles.sort();
     check!(titles == vec!["Task 0", "Task 1", "Task 2"]);
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn destroy_deletes_and_returns_resource() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     let created = cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -286,20 +301,19 @@ async fn destroy_deletes_and_returns_resource() {
             priority: Priority::High,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task");
 
-    let destroyed = cinderblock_core::destroy::<Task, Remove>(&created.task_id, &ctx)
+    let destroyed = cinderblock_core::destroy::<Task, Remove>(&created.task_id, &db.ctx)
         .await
         .expect("destroy task");
 
     check!(destroyed.task_id == created.task_id);
     check!(destroyed.title == "Doomed task");
 
-    // Verify the table is now empty.
-    let tasks = cinderblock_core::read::<Task, All>(&ctx, &())
+    let tasks = cinderblock_core::read::<Task, All>(&db.ctx, &())
         .await
         .expect("list tasks");
 
@@ -307,57 +321,24 @@ async fn destroy_deletes_and_returns_resource() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn destroy_nonexistent_returns_error() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     let fake_id = Uuid::new_v4();
-    let result = cinderblock_core::destroy::<Task, Remove>(&fake_id, &ctx).await;
+    let result = cinderblock_core::destroy::<Task, Remove>(&fake_id, &db.ctx).await;
 
     assert!(let Err(_) = result);
 }
 
-#[tokio::test]
-async fn create_multiple_then_destroy_one() {
-    let (ctx, _dl) = setup().await;
-
-    let task_a = cinderblock_core::create::<Task, Add>(
-        AddInput {
-            title: "Keep me".to_string(),
-            priority: Priority::Low,
-            done: false,
-        },
-        &ctx,
-    )
-    .await
-    .expect("create task A");
-
-    let task_b = cinderblock_core::create::<Task, Add>(
-        AddInput {
-            title: "Delete me".to_string(),
-            priority: Priority::High,
-            done: true,
-        },
-        &ctx,
-    )
-    .await
-    .expect("create task B");
-
-    cinderblock_core::destroy::<Task, Remove>(&task_b.task_id, &ctx)
-        .await
-        .expect("destroy task B");
-
-    let remaining = cinderblock_core::read::<Task, All>(&ctx, &())
-        .await
-        .expect("list tasks");
-
-    check!(remaining.len() == 1);
-    check!(remaining[0].task_id == task_a.task_id);
-    check!(remaining[0].title == "Keep me");
-}
+// ---------------------------------------------------------------------------
+// # Filter Tests
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn read_actions_with_filter() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -365,34 +346,35 @@ async fn read_actions_with_filter() {
             priority: Priority::Low,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task A");
 
     let expected = cinderblock_core::create::<Task, Add>(
         AddInput {
-            title: "Very import".to_string(),
+            title: "Very important".to_string(),
             priority: Priority::High,
             done: true,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task B");
 
-    let open_tasks = cinderblock_core::read::<Task, ImportantTasks>(&ctx, &())
+    let important = cinderblock_core::read::<Task, ImportantTasks>(&db.ctx, &())
         .await
-        .expect("destroy task B");
+        .expect("read important tasks");
 
-    check!(open_tasks.len() == 1);
-    check!(open_tasks[0].task_id == expected.task_id);
-    check!(open_tasks[0].title == expected.title);
+    check!(important.len() == 1);
+    check!(important[0].task_id == expected.task_id);
+    check!(important[0].title == expected.title);
 }
 
 #[tokio::test]
-async fn read_actions_with_filter_2() {
-    let (ctx, _dl) = setup().await;
+#[ignore = "requires Docker"]
+async fn read_actions_with_bool_filter() {
+    let db = start_postgres().await;
 
     cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -400,7 +382,7 @@ async fn read_actions_with_filter_2() {
             priority: Priority::Low,
             done: true,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task A");
@@ -411,14 +393,14 @@ async fn read_actions_with_filter_2() {
             priority: Priority::Medium,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create task B");
 
-    let open_tasks = cinderblock_core::read::<Task, OpenTasks>(&ctx, &())
+    let open_tasks = cinderblock_core::read::<Task, OpenTasks>(&db.ctx, &())
         .await
-        .expect("destroy task B");
+        .expect("read open tasks");
 
     check!(open_tasks.len() == 1);
     check!(open_tasks[0].task_id == expected.task_id);
@@ -426,12 +408,13 @@ async fn read_actions_with_filter_2() {
 }
 
 // ---------------------------------------------------------------------------
-// # Runtime argument tests
+// # Argument Filter Tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn read_action_with_required_argument() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -439,7 +422,7 @@ async fn read_action_with_required_argument() {
             priority: Priority::Low,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create low-priority task");
@@ -450,14 +433,13 @@ async fn read_action_with_required_argument() {
             priority: Priority::High,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create high-priority task");
 
-    // Use the `by_priority` read action with a required argument
     let results = cinderblock_core::read::<Task, ByPriority>(
-        &ctx,
+        &db.ctx,
         &ByPriorityArguments {
             priority: Priority::High,
         },
@@ -471,8 +453,9 @@ async fn read_action_with_required_argument() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn read_action_with_optional_argument_some() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -480,7 +463,7 @@ async fn read_action_with_optional_argument_some() {
             priority: Priority::High,
             done: true,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create done high-priority task");
@@ -491,14 +474,13 @@ async fn read_action_with_optional_argument_some() {
             priority: Priority::High,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create open high-priority task");
 
-    // Both arguments provided — filters on priority AND done
     let results = cinderblock_core::read::<Task, ByPriorityAndStatus>(
-        &ctx,
+        &db.ctx,
         &ByPriorityAndStatusArguments {
             priority: Priority::High,
             done: Some(false),
@@ -513,8 +495,9 @@ async fn read_action_with_optional_argument_some() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn read_action_with_optional_argument_none() {
-    let (ctx, _dl) = setup().await;
+    let db = start_postgres().await;
 
     cinderblock_core::create::<Task, Add>(
         AddInput {
@@ -522,7 +505,7 @@ async fn read_action_with_optional_argument_none() {
             priority: Priority::High,
             done: true,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create done high-priority task");
@@ -533,14 +516,13 @@ async fn read_action_with_optional_argument_none() {
             priority: Priority::High,
             done: false,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create open high-priority task");
 
-    // Optional `done` argument is None — only filters on priority
     let results = cinderblock_core::read::<Task, ByPriorityAndStatus>(
-        &ctx,
+        &db.ctx,
         &ByPriorityAndStatusArguments {
             priority: Priority::High,
             done: None,
@@ -553,17 +535,12 @@ async fn read_action_with_optional_argument_none() {
 }
 
 // ---------------------------------------------------------------------------
-// # Database-generated value tests
+// # Generated Column Tests
 // ---------------------------------------------------------------------------
-//
-// This second resource exercises `generated true` on the primary key
-// (autoincrement integer) and on a non-PK column (a `created_at` text
-// field with a server-side DEFAULT). These columns should be omitted from
-// INSERT and UPDATE statements, with their values coming from the database.
 
 resource! {
     name = Test.Note;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         note_id i64 {
@@ -594,11 +571,125 @@ resource! {
     }
 }
 
+async fn start_postgres_notes() -> PgTestDb {
+    let container = Postgres::default()
+        .with_db_name("cinderblock_test")
+        .with_user("test")
+        .with_password("test")
+        .start()
+        .await
+        .expect("start PostgreSQL container");
+
+    let host = container.get_host().await.expect("get host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get mapped port");
+
+    let url = format!("postgres://test:test@{host}:{port}/cinderblock_test");
+    let dl = PostgresDataLayer::new(&url)
+        .await
+        .expect("connect to PostgreSQL");
+
+    sqlx::query(
+        "CREATE TABLE notes (
+            note_id BIGSERIAL PRIMARY KEY,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT to_char(now(), 'YYYY-MM-DD HH24:MI:SS')
+        )",
+    )
+    .execute(dl.pool())
+    .await
+    .expect("create notes table");
+
+    let mut ctx = Context::new();
+    ctx.register_data_layer(dl.clone());
+
+    PgTestDb {
+        dl,
+        ctx: Arc::new(ctx),
+        _container: container,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generated_pk_is_assigned_by_database() {
+    let db = start_postgres_notes().await;
+
+    let note = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Hello world".to_string(),
+        },
+        &db.ctx,
+    )
+    .await
+    .expect("create note");
+
+    check!(note.note_id > 0);
+    check!(note.body == "Hello world");
+    check!(!note.created_at.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generated_pk_increments_across_inserts() {
+    let db = start_postgres_notes().await;
+
+    let first = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "First".to_string(),
+        },
+        &db.ctx,
+    )
+    .await
+    .expect("create first note");
+
+    let second = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Second".to_string(),
+        },
+        &db.ctx,
+    )
+    .await
+    .expect("create second note");
+
+    check!(second.note_id > first.note_id);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generated_column_not_overwritten_by_update() {
+    let db = start_postgres_notes().await;
+
+    let created = cinderblock_core::create::<Note, AddNote>(
+        AddNoteInput {
+            body: "Original".to_string(),
+        },
+        &db.ctx,
+    )
+    .await
+    .expect("create note");
+
+    let updated = cinderblock_core::update::<Note, EditNote>(
+        &created.note_id,
+        EditNoteInput {
+            body: "Revised".to_string(),
+        },
+        &db.ctx,
+    )
+    .await
+    .expect("update note");
+
+    check!(updated.body == "Revised");
+    check!(updated.note_id == created.note_id);
+    check!(updated.created_at == created.created_at);
+}
+
 // ---------------------------------------------------------------------------
 // # Paged Read Tests
 // ---------------------------------------------------------------------------
 
-/// Helper: insert `n` tasks with sequential titles and the given priority.
 async fn seed_tasks(ctx: &Context, n: usize, priority: Priority) -> Vec<Task> {
     let mut tasks = Vec::with_capacity(n);
     for i in 0..n {
@@ -618,12 +709,13 @@ async fn seed_tasks(ctx: &Context, n: usize, priority: Priority) -> Vec<Task> {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn paged_read_returns_paginated_result() {
-    let (ctx, _dl) = setup().await;
-    seed_tasks(&ctx, 5, Priority::Low).await;
+    let db = start_postgres().await;
+    seed_tasks(&db.ctx, 5, Priority::Low).await;
 
     let result = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
+        &db.ctx,
         &PagedAllArguments {
             page: None,
             per_page: None,
@@ -632,8 +724,6 @@ async fn paged_read_returns_paginated_result() {
     .await
     .expect("paged read all");
 
-    // Default page is 1, default per_page is DEFAULT_PER_PAGE (100), so all 5
-    // tasks fit on the first page.
     check!(result.data.len() == 5);
     check!(result.meta.page == 1);
     check!(result.meta.per_page == cinderblock_core::DEFAULT_PER_PAGE);
@@ -642,13 +732,13 @@ async fn paged_read_returns_paginated_result() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn paged_read_page_navigation() {
-    let (ctx, _dl) = setup().await;
-    seed_tasks(&ctx, 7, Priority::Medium).await;
+    let db = start_postgres().await;
+    seed_tasks(&db.ctx, 7, Priority::Medium).await;
 
-    // Request 3 items per page — should yield 3 pages (3, 3, 1).
     let page1 = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
+        &db.ctx,
         &PagedAllArguments {
             page: Some(1),
             per_page: Some(3),
@@ -664,7 +754,7 @@ async fn paged_read_page_navigation() {
     check!(page1.meta.total_pages == 3);
 
     let page2 = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
+        &db.ctx,
         &PagedAllArguments {
             page: Some(2),
             per_page: Some(3),
@@ -677,7 +767,7 @@ async fn paged_read_page_navigation() {
     check!(page2.meta.page == 2);
 
     let page3 = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
+        &db.ctx,
         &PagedAllArguments {
             page: Some(3),
             per_page: Some(3),
@@ -689,7 +779,6 @@ async fn paged_read_page_navigation() {
     check!(page3.data.len() == 1);
     check!(page3.meta.page == 3);
 
-    // No overlap between pages.
     let all_ids: Vec<_> = page1
         .data
         .iter()
@@ -702,285 +791,142 @@ async fn paged_read_page_navigation() {
 }
 
 #[tokio::test]
-async fn paged_read_beyond_last_page_returns_empty() {
-    let (ctx, _dl) = setup().await;
-    seed_tasks(&ctx, 3, Priority::Low).await;
-
-    let result = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
-        &PagedAllArguments {
-            page: Some(99),
-            per_page: Some(10),
-        },
-    )
-    .await
-    .expect("page beyond end");
-
-    check!(result.data.is_empty());
-    check!(result.meta.page == 99);
-    check!(result.meta.total == 3);
-    check!(result.meta.total_pages == 1);
-}
-
-#[tokio::test]
-async fn paged_read_empty_table() {
-    let (ctx, _dl) = setup().await;
-
-    let result = cinderblock_core::read::<Task, PagedAll>(
-        &ctx,
-        &PagedAllArguments {
-            page: None,
-            per_page: None,
-        },
-    )
-    .await
-    .expect("paged read on empty table");
-
-    check!(result.data.is_empty());
-    check!(result.meta.total == 0);
-    // With 0 total items, total_pages should be 0.
-    check!(result.meta.total_pages == 0);
-}
-
-#[tokio::test]
-async fn paged_read_with_custom_config_default_per_page() {
-    let (ctx, _dl) = setup().await;
-    // paged_by_priority has default_per_page 3, max_per_page 5.
-    seed_tasks(&ctx, 7, Priority::High).await;
+#[ignore = "requires Docker"]
+async fn paged_read_with_filter() {
+    let db = start_postgres().await;
+    seed_tasks(&db.ctx, 5, Priority::High).await;
+    seed_tasks(&db.ctx, 3, Priority::Low).await;
 
     let result = cinderblock_core::read::<Task, PagedByPriority>(
-        &ctx,
+        &db.ctx,
         &PagedByPriorityArguments {
             priority: Priority::High,
-            page: None,
-            per_page: None, // should default to 3
+            page: Some(1),
+            per_page: Some(3),
         },
     )
     .await
-    .expect("paged by priority with default per_page");
+    .expect("paged by priority");
 
     check!(result.data.len() == 3);
-    check!(result.meta.per_page == 3);
-    check!(result.meta.total == 7);
-    check!(result.meta.total_pages == 3); // ceil(7/3) = 3
-}
-
-#[tokio::test]
-async fn paged_read_max_per_page_clamping() {
-    let (ctx, _dl) = setup().await;
-    // paged_by_priority has max_per_page 5.
-    seed_tasks(&ctx, 10, Priority::Low).await;
-
-    let result = cinderblock_core::read::<Task, PagedByPriority>(
-        &ctx,
-        &PagedByPriorityArguments {
-            priority: Priority::Low,
-            page: Some(1),
-            per_page: Some(999), // should be clamped to 5
-        },
-    )
-    .await
-    .expect("paged read with clamped per_page");
-
-    check!(result.data.len() == 5);
-    check!(result.meta.per_page == 5);
-    check!(result.meta.total == 10);
+    check!(result.meta.total == 5);
     check!(result.meta.total_pages == 2);
 }
 
+// ---------------------------------------------------------------------------
+// # Order Tests
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn paged_read_with_filter_excludes_non_matching() {
-    let (ctx, _dl) = setup().await;
-    seed_tasks(&ctx, 4, Priority::High).await;
-    seed_tasks(&ctx, 6, Priority::Low).await;
+#[ignore = "requires Docker"]
+async fn order_asc_returns_sorted_results() {
+    let db = start_postgres().await;
 
-    let result = cinderblock_core::read::<Task, PagedByPriority>(
-        &ctx,
-        &PagedByPriorityArguments {
-            priority: Priority::High,
-            page: None,
-            per_page: Some(5), // max is 5
-        },
-    )
-    .await
-    .expect("paged read with filter");
-
-    // Only the 4 High-priority tasks should appear.
-    check!(result.data.len() == 4);
-    check!(result.meta.total == 4);
-    check!(result.meta.total_pages == 1);
-
-    for task in &result.data {
-        check!(task.priority == Priority::High);
+    for title in ["Charlie", "Alice", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &db.ctx,
+        )
+        .await
+        .expect("create task");
     }
+
+    let results = cinderblock_core::read::<Task, OrderedByTitle>(&db.ctx, &())
+        .await
+        .expect("read ordered by title asc");
+
+    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
+    check!(titles == vec!["Alice", "Bob", "Charlie"]);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn order_desc_returns_reverse_sorted_results() {
+    let db = start_postgres().await;
+
+    for title in ["Charlie", "Alice", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &db.ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let results = cinderblock_core::read::<Task, OrderedByTitleDesc>(&db.ctx, &())
+        .await
+        .expect("read ordered by title desc");
+
+    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
+    check!(titles == vec!["Charlie", "Bob", "Alice"]);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn paged_order_maintains_sort_across_pages() {
+    let db = start_postgres().await;
+
+    for title in ["Echo", "Charlie", "Alice", "Delta", "Bob"] {
+        cinderblock_core::create::<Task, Add>(
+            AddInput {
+                title: title.to_string(),
+                priority: Priority::Low,
+                done: false,
+            },
+            &db.ctx,
+        )
+        .await
+        .expect("create task");
+    }
+
+    let page1 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
+        &db.ctx,
+        &PagedOrderedByTitleArguments {
+            page: Some(1),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 1");
+
+    let page2 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
+        &db.ctx,
+        &PagedOrderedByTitleArguments {
+            page: Some(2),
+            per_page: Some(3),
+        },
+    )
+    .await
+    .expect("page 2");
+
+    check!(page1.data.len() == 3);
+    check!(page2.data.len() == 2);
+    check!(page1.meta.total == 5);
+
+    let all_titles: Vec<&str> = page1
+        .data
+        .iter()
+        .chain(page2.data.iter())
+        .map(|t| t.title.as_str())
+        .collect();
+    check!(all_titles == vec!["Alice", "Bob", "Charlie", "Delta", "Echo"]);
 }
 
 // ---------------------------------------------------------------------------
-// # Database-generated value tests
+// # Relation Loading Tests
 // ---------------------------------------------------------------------------
-
-/// Create a fresh in-memory SQLite database with the `notes` table that
-/// uses an autoincrement PK and a server-side DEFAULT for `created_at`.
-async fn setup_notes() -> (std::sync::Arc<cinderblock_core::Context>, SqliteDataLayer) {
-    let dl = SqliteDataLayer::new("sqlite::memory:")
-        .await
-        .expect("connect to in-memory SQLite");
-
-    sqlx::query(
-        "CREATE TABLE notes (
-            note_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            body TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )",
-    )
-    .execute(dl.pool())
-    .await
-    .expect("create notes table");
-
-    let mut ctx = cinderblock_core::Context::new();
-    ctx.register_data_layer(dl.clone());
-
-    (std::sync::Arc::new(ctx), dl)
-}
-
-#[tokio::test]
-async fn generated_pk_is_assigned_by_database() {
-    let (ctx, _dl) = setup_notes().await;
-
-    let note = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "Hello world".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create note");
-
-    // The database should have assigned a positive autoincrement ID,
-    // not the Rust Default::default() value of 0.
-    check!(note.note_id > 0);
-    check!(note.body == "Hello world");
-    // created_at should be populated by the database DEFAULT, not empty.
-    check!(!note.created_at.is_empty());
-}
-
-#[tokio::test]
-async fn generated_pk_increments_across_inserts() {
-    let (ctx, _dl) = setup_notes().await;
-
-    let first = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "First".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create first note");
-
-    let second = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "Second".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create second note");
-
-    check!(second.note_id > first.note_id);
-}
-
-#[tokio::test]
-async fn generated_column_not_overwritten_by_update() {
-    let (ctx, _dl) = setup_notes().await;
-
-    let created = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "Original".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create note");
-
-    let updated = cinderblock_core::update::<Note, EditNote>(
-        &created.note_id,
-        EditNoteInput {
-            body: "Revised".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("update note");
-
-    check!(updated.body == "Revised");
-    // The generated columns should be unchanged after the update.
-    check!(updated.note_id == created.note_id);
-    check!(updated.created_at == created.created_at);
-}
-
-#[tokio::test]
-async fn read_back_generated_values_via_list() {
-    let (ctx, _dl) = setup_notes().await;
-
-    let created = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "List test".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create note");
-
-    let notes = cinderblock_core::read::<Note, AllNotes>(&ctx, &())
-        .await
-        .expect("list notes");
-
-    check!(notes.len() == 1);
-    check!(notes[0].note_id == created.note_id);
-    check!(notes[0].body == "List test");
-    check!(notes[0].created_at == created.created_at);
-}
-
-#[tokio::test]
-async fn destroy_generated_pk_resource() {
-    let (ctx, _dl) = setup_notes().await;
-
-    let created = cinderblock_core::create::<Note, AddNote>(
-        AddNoteInput {
-            body: "Doomed note".to_string(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create note");
-
-    let destroyed = cinderblock_core::destroy::<Note, RemoveNote>(&created.note_id, &ctx)
-        .await
-        .expect("destroy note");
-
-    check!(destroyed.note_id == created.note_id);
-    check!(destroyed.body == "Doomed note");
-
-    let remaining = cinderblock_core::read::<Note, AllNotes>(&ctx, &())
-        .await
-        .expect("list notes");
-
-    check!(remaining.is_empty());
-}
-
-// ---------------------------------------------------------------------------
-// # Relation Loading Tests (SQLx)
-// ---------------------------------------------------------------------------
-//
-// These tests verify the `relations` + `load` DSL features using the SQLx
-// data layer. Each test creates a fresh in-memory SQLite database with the
-// necessary tables, so tests are fully isolated.
-
-// ## Belongs-to test resources
 
 resource! {
-    name = Test.Sqlx.Author;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    name = Test.Pg.Author;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         author_id Uuid {
@@ -1004,8 +950,8 @@ resource! {
 }
 
 resource! {
-    name = Test.Sqlx.Post;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    name = Test.Pg.Post;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         post_id Uuid {
@@ -1025,10 +971,8 @@ resource! {
     }
 
     actions {
-        // Plain read — no relations loaded, returns Vec<Post>
         read all_posts;
 
-        // Read with author loaded — returns Vec<AllPostsWithAuthorResponse>
         read all_posts_with_author {
             load [author];
         };
@@ -1043,11 +987,9 @@ resource! {
     }
 }
 
-// ## Has-many test resources
-
 resource! {
-    name = Test.Sqlx.Writer;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    name = Test.Pg.Writer;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         writer_id Uuid {
@@ -1083,8 +1025,8 @@ resource! {
 }
 
 resource! {
-    name = Test.Sqlx.Article;
-    data_layer = cinderblock_sqlx::sqlite::SqliteDataLayer;
+    name = Test.Pg.Article;
+    data_layer = cinderblock_sqlx::postgres::PostgresDataLayer;
 
     attributes {
         article_id Uuid {
@@ -1108,16 +1050,29 @@ resource! {
     }
 }
 
-/// Create a fresh in-memory SQLite database with `authors` and `posts`
-/// tables for belongs_to relation tests.
-async fn setup_blog() -> (Arc<Context>, SqliteDataLayer) {
-    let dl = SqliteDataLayer::new("sqlite::memory:")
+async fn start_postgres_blog() -> PgTestDb {
+    let container = Postgres::default()
+        .with_db_name("cinderblock_test")
+        .with_user("test")
+        .with_password("test")
+        .start()
         .await
-        .expect("connect to in-memory SQLite");
+        .expect("start PostgreSQL container");
+
+    let host = container.get_host().await.expect("get host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get mapped port");
+
+    let url = format!("postgres://test:test@{host}:{port}/cinderblock_test");
+    let dl = PostgresDataLayer::new(&url)
+        .await
+        .expect("connect to PostgreSQL");
 
     sqlx::query(
         "CREATE TABLE authors (
-            author_id TEXT NOT NULL PRIMARY KEY,
+            author_id UUID NOT NULL PRIMARY KEY,
             name TEXT NOT NULL
         )",
     )
@@ -1127,9 +1082,9 @@ async fn setup_blog() -> (Arc<Context>, SqliteDataLayer) {
 
     sqlx::query(
         "CREATE TABLE posts (
-            post_id TEXT NOT NULL PRIMARY KEY,
+            post_id UUID NOT NULL PRIMARY KEY,
             title TEXT NOT NULL,
-            author_id TEXT NOT NULL REFERENCES authors(author_id)
+            author_id UUID NOT NULL REFERENCES authors(author_id)
         )",
     )
     .execute(dl.pool())
@@ -1139,19 +1094,36 @@ async fn setup_blog() -> (Arc<Context>, SqliteDataLayer) {
     let mut ctx = Context::new();
     ctx.register_data_layer(dl.clone());
 
-    (Arc::new(ctx), dl)
+    PgTestDb {
+        dl,
+        ctx: Arc::new(ctx),
+        _container: container,
+    }
 }
 
-/// Create a fresh in-memory SQLite database with `writers` and `articles`
-/// tables for has_many relation tests.
-async fn setup_magazine() -> (Arc<Context>, SqliteDataLayer) {
-    let dl = SqliteDataLayer::new("sqlite::memory:")
+async fn start_postgres_magazine() -> PgTestDb {
+    let container = Postgres::default()
+        .with_db_name("cinderblock_test")
+        .with_user("test")
+        .with_password("test")
+        .start()
         .await
-        .expect("connect to in-memory SQLite");
+        .expect("start PostgreSQL container");
+
+    let host = container.get_host().await.expect("get host");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get mapped port");
+
+    let url = format!("postgres://test:test@{host}:{port}/cinderblock_test");
+    let dl = PostgresDataLayer::new(&url)
+        .await
+        .expect("connect to PostgreSQL");
 
     sqlx::query(
         "CREATE TABLE writers (
-            writer_id TEXT NOT NULL PRIMARY KEY,
+            writer_id UUID NOT NULL PRIMARY KEY,
             pen_name TEXT NOT NULL
         )",
     )
@@ -1161,9 +1133,9 @@ async fn setup_magazine() -> (Arc<Context>, SqliteDataLayer) {
 
     sqlx::query(
         "CREATE TABLE articles (
-            article_id TEXT NOT NULL PRIMARY KEY,
+            article_id UUID NOT NULL PRIMARY KEY,
             headline TEXT NOT NULL,
-            writer_id TEXT NOT NULL REFERENCES writers(writer_id)
+            writer_id UUID NOT NULL REFERENCES writers(writer_id)
         )",
     )
     .execute(dl.pool())
@@ -1173,22 +1145,23 @@ async fn setup_magazine() -> (Arc<Context>, SqliteDataLayer) {
     let mut ctx = Context::new();
     ctx.register_data_layer(dl.clone());
 
-    (Arc::new(ctx), dl)
+    PgTestDb {
+        dl,
+        ctx: Arc::new(ctx),
+        _container: container,
+    }
 }
 
-// ---------------------------------------------------------------------------
-// # Belongs-to relation tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn belongs_to_relation_loads_related_resource() {
-    let (ctx, _dl) = setup_blog().await;
+    let db = start_postgres_blog().await;
 
     let author = cinderblock_core::create::<Author, AddAuthor>(
         AddAuthorInput {
             name: "Alice".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create author");
@@ -1198,12 +1171,12 @@ async fn belongs_to_relation_loads_related_resource() {
             title: "Hello World".into(),
             author_id: author.author_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create post");
 
-    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
+    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&db.ctx, &())
         .await
         .expect("read posts with author");
 
@@ -1215,95 +1188,32 @@ async fn belongs_to_relation_loads_related_resource() {
 }
 
 #[tokio::test]
-async fn belongs_to_response_serializes_with_flattened_base() {
-    let (ctx, _dl) = setup_blog().await;
-
-    let author =
-        cinderblock_core::create::<Author, AddAuthor>(AddAuthorInput { name: "Bob".into() }, &ctx)
-            .await
-            .expect("create author");
-
-    cinderblock_core::create::<Post, AddPost>(
-        AddPostInput {
-            title: "Serialization Test".into(),
-            author_id: author.author_id,
-        },
-        &ctx,
-    )
-    .await
-    .expect("create post");
-
-    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
-        .await
-        .expect("read posts with author");
-
-    check!(results.len() == 1);
-
-    // Verify that serialization flattens the base resource fields
-    let json = serde_json::to_value(&results[0]).expect("serialize to JSON");
-    check!(json["title"] == "Serialization Test");
-    check!(json["author_id"] == author.author_id.to_string());
-    // The author relation should be nested as an object
-    check!(json["author"]["name"] == "Bob");
-}
-
-#[tokio::test]
-async fn read_without_load_returns_plain_vec() {
-    let (ctx, _dl) = setup_blog().await;
-
-    let author = cinderblock_core::create::<Author, AddAuthor>(
-        AddAuthorInput {
-            name: "Charlie".into(),
-        },
-        &ctx,
-    )
-    .await
-    .expect("create author");
-
-    cinderblock_core::create::<Post, AddPost>(
-        AddPostInput {
-            title: "No Load Test".into(),
-            author_id: author.author_id,
-        },
-        &ctx,
-    )
-    .await
-    .expect("create post");
-
-    // Reading without load returns Vec<Post>, not the wrapper
-    let results = cinderblock_core::read::<Post, AllPosts>(&ctx, &())
-        .await
-        .expect("read all posts");
-
-    check!(results.len() == 1);
-    check!(results[0].title == "No Load Test");
-    check!(results[0].author_id == author.author_id);
-}
-
-#[tokio::test]
+#[ignore = "requires Docker"]
 async fn belongs_to_with_multiple_posts_and_authors() {
-    let (ctx, _dl) = setup_blog().await;
+    let db = start_postgres_blog().await;
 
     let alice = cinderblock_core::create::<Author, AddAuthor>(
         AddAuthorInput {
             name: "Alice".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Alice");
 
-    let bob =
-        cinderblock_core::create::<Author, AddAuthor>(AddAuthorInput { name: "Bob".into() }, &ctx)
-            .await
-            .expect("create Bob");
+    let bob = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput { name: "Bob".into() },
+        &db.ctx,
+    )
+    .await
+    .expect("create Bob");
 
     cinderblock_core::create::<Post, AddPost>(
         AddPostInput {
             title: "Alice's Post".into(),
             author_id: alice.author_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Alice's post");
@@ -1313,18 +1223,17 @@ async fn belongs_to_with_multiple_posts_and_authors() {
             title: "Bob's Post".into(),
             author_id: bob.author_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Bob's post");
 
-    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&ctx, &())
+    let results = cinderblock_core::read::<Post, AllPostsWithAuthor>(&db.ctx, &())
         .await
         .expect("read all posts with authors");
 
     check!(results.len() == 2);
 
-    // Each post should have its correct author loaded
     let alice_post = results
         .iter()
         .find(|r| r.base.title == "Alice's Post")
@@ -1338,19 +1247,16 @@ async fn belongs_to_with_multiple_posts_and_authors() {
     check!(bob_post.author.name == "Bob");
 }
 
-// ---------------------------------------------------------------------------
-// # Has-many relation tests
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn has_many_relation_loads_related_resources() {
-    let (ctx, _dl) = setup_magazine().await;
+    let db = start_postgres_magazine().await;
 
     let writer = cinderblock_core::create::<Writer, AddWriter>(
         AddWriterInput {
             pen_name: "Diana".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create writer");
@@ -1360,7 +1266,7 @@ async fn has_many_relation_loads_related_resources() {
             headline: "Diana's First Article".into(),
             writer_id: writer.writer_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create article 1");
@@ -1370,12 +1276,12 @@ async fn has_many_relation_loads_related_resources() {
             headline: "Diana's Second Article".into(),
             writer_id: writer.writer_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create article 2");
 
-    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&db.ctx, &())
         .await
         .expect("read writers with articles");
 
@@ -1391,19 +1297,20 @@ async fn has_many_relation_loads_related_resources() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn has_many_with_no_related_resources_returns_empty_vec() {
-    let (ctx, _dl) = setup_magazine().await;
+    let db = start_postgres_magazine().await;
 
     let writer = cinderblock_core::create::<Writer, AddWriter>(
         AddWriterInput {
             pen_name: "Lonely Writer".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create writer");
 
-    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&db.ctx, &())
         .await
         .expect("read writers with articles");
 
@@ -1413,14 +1320,15 @@ async fn has_many_with_no_related_resources_returns_empty_vec() {
 }
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn has_many_with_multiple_writers() {
-    let (ctx, _dl) = setup_magazine().await;
+    let db = start_postgres_magazine().await;
 
     let diana = cinderblock_core::create::<Writer, AddWriter>(
         AddWriterInput {
             pen_name: "Diana".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Diana");
@@ -1429,18 +1337,17 @@ async fn has_many_with_multiple_writers() {
         AddWriterInput {
             pen_name: "Eve".into(),
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Eve");
 
-    // Diana has 2 articles
     cinderblock_core::create::<Article, AddArticle>(
         AddArticleInput {
             headline: "Diana's Article".into(),
             writer_id: diana.writer_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Diana's article");
@@ -1450,23 +1357,22 @@ async fn has_many_with_multiple_writers() {
             headline: "Diana's Other Article".into(),
             writer_id: diana.writer_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Diana's other article");
 
-    // Eve has 1 article
     cinderblock_core::create::<Article, AddArticle>(
         AddArticleInput {
             headline: "Eve's Article".into(),
             writer_id: eve.writer_id,
         },
-        &ctx,
+        &db.ctx,
     )
     .await
     .expect("create Eve's article");
 
-    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&ctx, &())
+    let results = cinderblock_core::read::<Writer, AllWritersWithArticles>(&db.ctx, &())
         .await
         .expect("read all writers with articles");
 
@@ -1484,148 +1390,4 @@ async fn has_many_with_multiple_writers() {
         .expect("Eve should be in results");
     check!(eve_result.articles.len() == 1);
     check!(eve_result.articles[0].headline == "Eve's Article");
-}
-
-// ---------------------------------------------------------------------------
-// # Order Tests (SQLx)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn order_asc_returns_sorted_results() {
-    let (ctx, _dl) = setup().await;
-
-    for title in ["Charlie", "Alice", "Bob"] {
-        cinderblock_core::create::<Task, Add>(
-            AddInput {
-                title: title.to_string(),
-                priority: Priority::Low,
-                done: false,
-            },
-            &ctx,
-        )
-        .await
-        .expect("create task");
-    }
-
-    let results = cinderblock_core::read::<Task, OrderedByTitle>(&ctx, &())
-        .await
-        .expect("read ordered by title asc");
-
-    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
-    check!(titles == vec!["Alice", "Bob", "Charlie"]);
-}
-
-#[tokio::test]
-async fn order_desc_returns_reverse_sorted_results() {
-    let (ctx, _dl) = setup().await;
-
-    for title in ["Charlie", "Alice", "Bob"] {
-        cinderblock_core::create::<Task, Add>(
-            AddInput {
-                title: title.to_string(),
-                priority: Priority::Low,
-                done: false,
-            },
-            &ctx,
-        )
-        .await
-        .expect("create task");
-    }
-
-    let results = cinderblock_core::read::<Task, OrderedByTitleDesc>(&ctx, &())
-        .await
-        .expect("read ordered by title desc");
-
-    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
-    check!(titles == vec!["Charlie", "Bob", "Alice"]);
-}
-
-#[tokio::test]
-async fn compound_order_sorts_by_multiple_fields() {
-    let (ctx, _dl) = setup().await;
-
-    for (title, priority) in [
-        ("Zara", Priority::High),
-        ("Alice", Priority::High),
-        ("Bob", Priority::Low),
-        ("Anna", Priority::Low),
-    ] {
-        cinderblock_core::create::<Task, Add>(
-            AddInput {
-                title: title.to_string(),
-                priority,
-                done: false,
-            },
-            &ctx,
-        )
-        .await
-        .expect("create task");
-    }
-
-    let results = cinderblock_core::read::<Task, OrderedByPriorityAndTitle>(&ctx, &())
-        .await
-        .expect("read compound order");
-
-    // Primary: priority DESC (text sort: Low > High alphabetically in SQLite)
-    // Actually in SQLite, TEXT ordering: "High" < "Low" < "Medium" alphabetically
-    // So DESC would be: Medium > Low > High
-    // But we only have High and Low here, so DESC: Low > High
-    // Secondary: title ASC within each group
-
-    // Low group first (desc), then High group
-    // Low group: Anna, Bob (ASC)
-    // High group: Alice, Zara (ASC)
-    let titles: Vec<&str> = results.iter().map(|t| t.title.as_str()).collect();
-    check!(titles == vec!["Anna", "Bob", "Alice", "Zara"]);
-}
-
-#[tokio::test]
-async fn paged_order_maintains_sort_across_pages() {
-    let (ctx, _dl) = setup().await;
-
-    for title in ["Echo", "Charlie", "Alice", "Delta", "Bob"] {
-        cinderblock_core::create::<Task, Add>(
-            AddInput {
-                title: title.to_string(),
-                priority: Priority::Low,
-                done: false,
-            },
-            &ctx,
-        )
-        .await
-        .expect("create task");
-    }
-
-    let page1 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
-        &ctx,
-        &PagedOrderedByTitleArguments {
-            page: Some(1),
-            per_page: Some(3),
-        },
-    )
-    .await
-    .expect("page 1");
-
-    let page2 = cinderblock_core::read::<Task, PagedOrderedByTitle>(
-        &ctx,
-        &PagedOrderedByTitleArguments {
-            page: Some(2),
-            per_page: Some(3),
-        },
-    )
-    .await
-    .expect("page 2");
-
-    check!(page1.data.len() == 3);
-    check!(page2.data.len() == 2);
-    check!(page1.meta.total == 5);
-
-    let all_titles = page1
-        .data
-        .iter()
-        .chain(page2.data.iter())
-        .map(|t| t.title.as_str())
-        .collect::<Vec<_>>();
-
-    check!(all_titles == vec!["Alice", "Bob", "Charlie", "Delta", "Echo"]);
 }

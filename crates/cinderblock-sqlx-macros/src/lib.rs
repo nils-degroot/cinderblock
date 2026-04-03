@@ -268,12 +268,13 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             // no ordering, just a primary key lookup.
             if action_read.get {
                 return quote::quote! {
-                    impl cinderblock_sqlx::SqlPerformReadOne for #action_name {
+                    impl cinderblock_sqlx::SqlPerformReadOne<$db> for #action_name {
                         async fn execute(
-                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            pool: &$pool,
                             args: &Self::Arguments,
                         ) -> Result<Self::Response, cinderblock_core::ReadError> {
-                            cinderblock_sqlx::execute_sql_read_one::<#ident>(pool, args).await
+                            use $qmod as __qmod;
+                            __qmod::execute_sql_read_one::<#ident>(pool, args).await
                         }
                     }
                 };
@@ -439,8 +440,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                     if fk_values.is_empty() {
                                         ::std::collections::HashMap::new()
                                     } else {
-                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
-                                        let related_pk_col = <#rel_ty as cinderblock_sqlx::SqlResource>::PRIMARY_KEY_COLUMN;
+                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource<$db>>::TABLE_NAME;
+                                        let related_pk_col = <#rel_ty as cinderblock_sqlx::SqlResource<$db>>::PRIMARY_KEY_COLUMN;
 
                                         let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
                                             format!("SELECT * FROM {} WHERE {} IN (", related_table, related_pk_col)
@@ -452,7 +453,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         }
                                         builder.push(")");
 
-                                        let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                        let rows: Vec<$row> = builder
                                             .build()
                                             .fetch_all(pool)
                                             .await
@@ -467,7 +468,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
                                         let mut map = ::std::collections::HashMap::with_capacity(rows.len());
                                         for row in &rows {
-                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource<$db>>::from_row(row)
                                                 .map_err(cinderblock_core::ListError::DataLayer)?;
                                             use cinderblock_core::Resource;
                                             map.insert(related.primary_key().to_string(), related);
@@ -504,7 +505,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                     if pk_values.is_empty() {
                                         ::std::collections::HashMap::new()
                                     } else {
-                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource>::TABLE_NAME;
+                                        let related_table = <#rel_ty as cinderblock_sqlx::SqlResource<$db>>::TABLE_NAME;
 
                                         let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(
                                             format!("SELECT * FROM {} WHERE {} IN (", related_table, #source_attr_str)
@@ -516,7 +517,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         }
                                         builder.push(")");
 
-                                        let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                        let rows: Vec<$row> = builder
                                             .build()
                                             .fetch_all(pool)
                                             .await
@@ -532,7 +533,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         let mut map: ::std::collections::HashMap<String, Vec<#rel_ty>> =
                                             ::std::collections::HashMap::new();
                                         for row in &rows {
-                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource<$db>>::from_row(row)
                                                 .map_err(cinderblock_core::ListError::DataLayer)?;
                                             let key = related.#source_attr.to_string();
                                             map.entry(key).or_default().push(related);
@@ -589,27 +590,26 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 });
 
                 quote::quote! {
-                    impl cinderblock_sqlx::SqlPerformRead for #action_name {
+                    impl cinderblock_sqlx::SqlPerformRead<$db> for #action_name {
                         async fn execute(
-                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            pool: &$pool,
                             args: &Self::Arguments,
                         ) -> Result<Self::Response, cinderblock_core::ListError> {
                             use cinderblock_sqlx::sqlx::Row;
 
-                            // Step 1: Run the base query with filters
                             let base_rows: Vec<#ident> = {
                                 let mut builder = cinderblock_sqlx::sqlx::QueryBuilder::new(format!(
                                     "SELECT * FROM {} ",
-                                    <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                    <#ident as cinderblock_sqlx::SqlResource<$db>>::TABLE_NAME,
                                 ));
 
                                 let mut filter_count: u32 = 0;
                                 #(#filter_stmts)*
-                                let _ = filter_count; // suppress unused warning when no filters
+                                let _ = filter_count;
 
                                 #order_by_push
 
-                                let rows: Vec<cinderblock_sqlx::sqlx::sqlite::SqliteRow> = builder
+                                let rows: Vec<$row> = builder
                                     .build()
                                     .fetch_all(pool)
                                     .await
@@ -617,7 +617,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         cinderblock_core::ListError::DataLayer(
                                             format!(
                                                 "read from `{}`: {e}",
-                                                <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                                <#ident as cinderblock_sqlx::SqlResource<$db>>::TABLE_NAME,
                                             ).into(),
                                         )
                                     })?;
@@ -625,17 +625,15 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 let mut result = Vec::with_capacity(rows.len());
                                 for row in &rows {
                                     result.push(
-                                        <#ident as cinderblock_sqlx::SqlResource>::from_row(row)
+                                        <#ident as cinderblock_sqlx::SqlResource<$db>>::from_row(row)
                                             .map_err(cinderblock_core::ListError::DataLayer)?
                                     );
                                 }
                                 result
                             };
 
-                            // Step 2: Load related resources via batched queries
                             #(#relation_loads)*
 
-                            // Step 3: Assemble response wrappers
                             let results: Result<Vec<#wrapper_name>, cinderblock_core::ListError> = base_rows
                                 .into_iter()
                                 .map(|row| -> Result<#wrapper_name, cinderblock_core::ListError> {
@@ -651,30 +649,29 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     }
                 }
             } else {
-                // # Standard read action codegen (no relation loading)
-
                 let trait_path = if is_paged {
-                    quote::quote! { cinderblock_sqlx::SqlPagedReadAction }
+                    quote::quote! { cinderblock_sqlx::SqlPagedReadAction<$db> }
                 } else {
-                    quote::quote! { cinderblock_sqlx::SqlReadAction }
+                    quote::quote! { cinderblock_sqlx::SqlReadAction<$db> }
                 };
 
-                // Generate `SqlPerformRead` that delegates to the appropriate
-                // standalone execute function.
                 let perform_read_body = if is_paged {
                     quote::quote! {
-                        cinderblock_sqlx::execute_sql_paged_read::<Self>(pool, args).await
+                        use $qmod as __qmod;
+                        __qmod::execute_sql_paged_read::<Self>(pool, args).await
                     }
                 } else {
                     quote::quote! {
-                        cinderblock_sqlx::execute_sql_read::<Self>(pool, args).await
+                        use $qmod as __qmod;
+                        __qmod::execute_sql_read::<Self>(pool, args).await
                     }
                 };
 
                 quote::quote! {
                     impl #trait_path for #action_name {
+                        #[allow(unused_variables, unused_mut)]
                         fn bind_filters(
-                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
+                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, $db>,
                             args: &Self::Arguments,
                         ) -> bool {
                             let mut filter_count: u32 = 0;
@@ -682,16 +679,17 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             filter_count > 0
                         }
 
+                        #[allow(unused_variables)]
                         fn bind_order(
-                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
+                            builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, $db>,
                         ) {
                             #order_by_push
                         }
                     }
 
-                    impl cinderblock_sqlx::SqlPerformRead for #action_name {
+                    impl cinderblock_sqlx::SqlPerformRead<$db> for #action_name {
                         async fn execute(
-                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            pool: &$pool,
                             args: &Self::Arguments,
                         ) -> Result<Self::Response, cinderblock_core::ListError> {
                             #perform_read_body
@@ -701,47 +699,72 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             }
         });
 
+    let macro_name = Ident::new(&format!("__cinderblock_sqlx_impl_{}", ident), ident.span());
+
     quote::quote! {
-        impl cinderblock_sqlx::SqlResource for #ident {
-            const TABLE_NAME: &'static str = #table_name;
-            const COLUMN_NAMES: &'static [&'static str] = &[#(#column_name_literals),*];
-            const INSERT_COLUMN_NAMES: &'static [&'static str] = &[#(#insert_column_name_literals),*];
-            const PRIMARY_KEY_COLUMN: &'static str = #pk_column;
+        macro_rules! #macro_name {
+            ($db:ty, $row:ty, $pool:ty, $qmod:path) => {
+                impl cinderblock_sqlx::SqlResource<$db> for #ident {
+                    const TABLE_NAME: &'static str = #table_name;
+                    const COLUMN_NAMES: &'static [&'static str] = &[#(#column_name_literals),*];
+                    const INSERT_COLUMN_NAMES: &'static [&'static str] = &[#(#insert_column_name_literals),*];
+                    const PRIMARY_KEY_COLUMN: &'static str = #pk_column;
 
-            fn bind_insert(
-                &self,
-                builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
-            ) {
-                let mut sep = builder.separated(", ");
-                #(#bind_insert_calls)*
-            }
+                    #[allow(unused_variables)]
+                    fn bind_insert(
+                        &self,
+                        builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, $db>,
+                    ) {
+                        let mut sep = builder.separated(", ");
+                        #(#bind_insert_calls)*
+                    }
 
-            fn bind_update(
-                &self,
-                builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
-            ) {
-                let mut sep = builder.separated(", ");
-                #(#bind_update_calls)*
-            }
+                    #[allow(unused_variables)]
+                    fn bind_update(
+                        &self,
+                        builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, $db>,
+                    ) {
+                        let mut sep = builder.separated(", ");
+                        #(#bind_update_calls)*
+                    }
 
-            fn bind_primary_key(
-                pk: &<Self as cinderblock_core::Resource>::PrimaryKey,
-                builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, cinderblock_sqlx::sqlx::Sqlite>,
-            ) {
-                builder.push_bind(pk.clone());
-            }
+                    #[allow(unused_variables)]
+                    fn bind_primary_key(
+                        pk: &<Self as cinderblock_core::Resource>::PrimaryKey,
+                        builder: &mut cinderblock_sqlx::sqlx::QueryBuilder<'_, $db>,
+                    ) {
+                        builder.push_bind(pk.clone());
+                    }
 
-            fn from_row(
-                row: &cinderblock_sqlx::sqlx::sqlite::SqliteRow,
-            ) -> Result<Self, Box<dyn ::std::error::Error + Send + Sync>> {
-                use cinderblock_sqlx::sqlx::Row;
-                Ok(Self {
-                    #(#from_row_fields)*
-                })
-            }
+                    fn from_row(
+                        row: &$row,
+                    ) -> Result<Self, Box<dyn ::std::error::Error + Send + Sync>> {
+                        use cinderblock_sqlx::sqlx::Row;
+                        Ok(Self {
+                            #(#from_row_fields)*
+                        })
+                    }
+                }
+
+                #(#read_actions)*
+            };
         }
 
-        #(#read_actions)*
+        #[cfg(feature = "sqlite")]
+        #macro_name!(
+            cinderblock_sqlx::sqlx::Sqlite,
+            cinderblock_sqlx::sqlx::sqlite::SqliteRow,
+            cinderblock_sqlx::sqlx::SqlitePool,
+            cinderblock_sqlx::sqlite_query
+        );
+
+        #[cfg(feature = "postgres")]
+        #macro_name!(
+            cinderblock_sqlx::sqlx::Postgres,
+            cinderblock_sqlx::sqlx::postgres::PgRow,
+            cinderblock_sqlx::sqlx::PgPool,
+            cinderblock_sqlx::postgres_query
+        );
     }
     .into()
 }

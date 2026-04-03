@@ -1,6 +1,6 @@
 [package]
 name = "cinderblock-sqlx"
-description = "SQLite persistence layer for cinderblock using SQLx with generated query building and dynamic filters"
+description = "SQL persistence layer for cinderblock using SQLx with generated query building and dynamic filters"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,29 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+
 [dependencies]
 cinderblock-core.workspace = true
 cinderblock-sqlx-macros.workspace = true
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "uuid"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
 assert2 = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["full"] }
+
+[[test]]
+name = "sqlite_crud"
+required-features = ["sqlite"]
+
+[[test]]
+name = "postgres_crud"
+required-features = ["postgres"]
