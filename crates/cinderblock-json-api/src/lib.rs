@@ -65,6 +65,29 @@
 //! When the `swagger-ui` feature is enabled, a Swagger UI is mounted at
 //! `/swagger-ui`. This can be toggled off via [`RouterConfig::swagger_ui`].
 //!
+//! ## CORS
+//!
+//! When the `cors` feature is enabled, CORS middleware can be configured via
+//! [`RouterConfig::cors`] or [`RouterConfig::cors_permissive`]:
+//!
+//! ```rust,ignore
+//! use cinderblock_json_api::tower_http::cors::CorsLayer;
+//! use http::{Method, header};
+//!
+//! // Production: explicit origins and methods.
+//! let app = cinderblock_json_api::RouterConfig::new(ctx)
+//!     .cors(CorsLayer::new()
+//!         .allow_origin("https://app.example.com".parse::<http::HeaderValue>().unwrap())
+//!         .allow_methods([Method::GET, Method::POST])
+//!         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]))
+//!     .build();
+//!
+//! // Development: allow everything.
+//! let app = cinderblock_json_api::RouterConfig::new(ctx)
+//!     .cors_permissive()
+//!     .build();
+//! ```
+//!
 //! ## Custom types in OpenAPI schemas
 //!
 //! The generated OpenAPI schemas use the [`FieldSchema`] trait to produce
@@ -170,6 +193,11 @@ pub use axum;
 pub use inventory;
 pub use tracing;
 pub use utoipa;
+
+// Re-export tower-http so users can build a `CorsLayer` without adding the
+// dependency themselves.  Only available when the `cors` feature is enabled.
+#[cfg(feature = "cors")]
+pub use tower_http;
 
 // Re-export the extension proc macro so `resource!` can call
 // `cinderblock_json_api::__resource_extension!`.
@@ -490,6 +518,8 @@ inventory::collect!(ResourceEndpoint);
 pub struct RouterConfig {
     ctx: Arc<cinderblock_core::Context>,
     swagger_ui: bool,
+    #[cfg(feature = "cors")]
+    cors: Option<tower_http::cors::CorsLayer>,
 }
 
 impl RouterConfig {
@@ -497,6 +527,8 @@ impl RouterConfig {
         Self {
             ctx: ctx.into(),
             swagger_ui: true,
+            #[cfg(feature = "cors")]
+            cors: None,
         }
     }
 
@@ -505,6 +537,23 @@ impl RouterConfig {
     /// Default: `true`.
     pub fn swagger_ui(mut self, enabled: bool) -> Self {
         self.swagger_ui = enabled;
+        self
+    }
+
+    /// Set a custom CORS layer.
+    /// Only takes effect when the `cors` feature is enabled.
+    #[cfg(feature = "cors")]
+    pub fn cors(mut self, layer: tower_http::cors::CorsLayer) -> Self {
+        self.cors = Some(layer);
+        self
+    }
+
+    /// Enable a permissive CORS policy (allow any origin, method, and header).
+    /// Intended for local development only.
+    /// Only takes effect when the `cors` feature is enabled.
+    #[cfg(feature = "cors")]
+    pub fn cors_permissive(mut self) -> Self {
+        self.cors = Some(tower_http::cors::CorsLayer::permissive());
         self
     }
 
@@ -558,6 +607,11 @@ impl RouterConfig {
 
             #[cfg(not(feature = "swagger-ui"))]
             let _ = self.swagger_ui;
+        }
+
+        #[cfg(feature = "cors")]
+        if let Some(cors_layer) = self.cors {
+            router = router.layer(cors_layer);
         }
 
         router
