@@ -142,7 +142,7 @@ enum TicketStatus {
 cinderblock_json_api::impl_field_schema!(TicketStatus);
 
 #[tokio::main]
-async fn main() -> cinderblock_core::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing so we can see the extension's log output.
     tracing_subscriber::fmt::init();
 

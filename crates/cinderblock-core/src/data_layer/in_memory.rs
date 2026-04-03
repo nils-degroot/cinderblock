@@ -6,7 +6,10 @@ use std::{
 
 use tokio::sync::RwLock;
 
-use crate::{PerformRead, ReadAction, Resource, data_layer::DataLayer};
+use crate::{
+    DestroyError, ListError, PerformRead, ReadAction, ReadError, Resource, UpdateError,
+    data_layer::DataLayer,
+};
 
 type State =
     LazyLock<Arc<RwLock<HashMap<TypeId, HashMap<String, Box<dyn Any + Send + Sync + 'static>>>>>>;
@@ -41,7 +44,7 @@ impl InMemoryDataLayer {
 }
 
 impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
-    async fn create(&self, resource: R) -> crate::Result<R> {
+    async fn create(&self, resource: R) -> Result<R, crate::CreateError> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
@@ -54,7 +57,7 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
         Ok(resource)
     }
 
-    async fn read(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {
+    async fn read(&self, primary_key: &R::PrimaryKey) -> Result<R, crate::ReadError> {
         let state = STATE.clone();
         let state = state.read().await;
 
@@ -65,10 +68,10 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
             .and_then(|map| map.get(&key))
             .and_then(|boxed| boxed.downcast_ref::<R>())
             .cloned()
-            .ok_or_else(|| format!("resource not found for primary key `{key}`").into())
+            .ok_or_else(|| ReadError::NotFound { primary_key: key })
     }
 
-    async fn update(&self, resource: R) -> crate::Result<()> {
+    async fn update(&self, resource: R) -> Result<(), crate::UpdateError> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
@@ -76,10 +79,12 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
 
         let map = state
             .get_mut(&TypeId::of::<R>())
-            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+            .ok_or_else(|| UpdateError::NotFound {
+                primary_key: key.clone(),
+            })?;
 
         if !map.contains_key(&key) {
-            return Err(format!("resource not found for primary key `{key}`").into());
+            return Err(UpdateError::NotFound { primary_key: key });
         }
 
         map.insert(key, Box::new(resource.clone()));
@@ -87,7 +92,7 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
         Ok(())
     }
 
-    async fn destroy(&self, primary_key: &R::PrimaryKey) -> crate::Result<R> {
+    async fn destroy(&self, primary_key: &R::PrimaryKey) -> Result<R, crate::DestroyError> {
         let state = STATE.clone();
         let mut state = state.write().await;
 
@@ -95,16 +100,18 @@ impl<R: Resource + 'static> DataLayer<R> for InMemoryDataLayer {
 
         let map = state
             .get_mut(&TypeId::of::<R>())
-            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+            .ok_or_else(|| DestroyError::NotFound {
+                primary_key: key.clone(),
+            })?;
 
-        let boxed = map
-            .remove(&key)
-            .ok_or_else(|| format!("resource not found for primary key `{key}`"))?;
+        let boxed = map.remove(&key).ok_or_else(|| DestroyError::NotFound {
+            primary_key: key.clone(),
+        })?;
 
         boxed
             .downcast::<R>()
             .map(|r| *r)
-            .map_err(|_| "failed to downcast destroyed resource".into())
+            .map_err(|_| DestroyError::DataLayer("failed to downcast destroyed resource".into()))
     }
 }
 
@@ -139,7 +146,7 @@ where
     R: Resource + 'static,
     A: ReadAction<Output = R> + InMemoryPerformRead + 'static,
 {
-    async fn read(&self, args: &A::Arguments) -> crate::Result<A::Response> {
+    async fn read(&self, args: &A::Arguments) -> Result<A::Response, ListError> {
         let state = STATE.clone();
         let state = state.read().await;
 

@@ -462,11 +462,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                                 error = %err,
                                                 "paged read request failed"
                                             );
-                                            (
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                                err.to_string(),
-                                            )
-                                                .into_response()
+                                            let status = match err.data() {
+                                                cinderblock_core::ListError::DataLayer(_) =>
+                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            };
+                                            (status, err.to_string()).into_response()
                                         }
                                     }
                                 }
@@ -502,11 +502,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                                 error = %err,
                                                 "read request failed"
                                             );
-                                            (
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                                err.to_string(),
-                                            )
-                                                .into_response()
+                                            let status = match err.data() {
+                                                cinderblock_core::ListError::DataLayer(_) =>
+                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            };
+                                            (status, err.to_string()).into_response()
                                         }
                                     }
                                 }
@@ -538,11 +538,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                                 error = %err,
                                                 "read request failed"
                                             );
-                                            (
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                                err.to_string(),
-                                            )
-                                                .into_response()
+                                            let status = match err.data() {
+                                                cinderblock_core::ListError::DataLayer(_) =>
+                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            };
+                                            (status, err.to_string()).into_response()
                                         }
                                     }
                                 }
@@ -582,11 +582,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                             error = %err,
                                             "create request failed"
                                         );
-                                        (
-                                            cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                            err.to_string(),
-                                        )
-                                            .into_response()
+                                        let status = match err.data() {
+                                            cinderblock_core::CreateError::DataLayer(_) =>
+                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        };
+                                        (status, err.to_string()).into_response()
                                     }
                                 }
                             }
@@ -637,11 +637,13 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                             error = %err,
                                             "update request failed"
                                         );
-                                        (
-                                            cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                            err.to_string(),
-                                        )
-                                            .into_response()
+                                        let status = match err.data() {
+                                            cinderblock_core::UpdateError::NotFound { .. } =>
+                                                cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                                            cinderblock_core::UpdateError::DataLayer(_) =>
+                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        };
+                                        (status, err.to_string()).into_response()
                                     }
                                 }
                             }
@@ -682,11 +684,13 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                             error = %err,
                                             "destroy request failed"
                                         );
-                                        (
-                                            cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                            err.to_string(),
-                                        )
-                                            .into_response()
+                                        let status = match err.data() {
+                                            cinderblock_core::DestroyError::NotFound { .. } =>
+                                                cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                                            cinderblock_core::DestroyError::DataLayer(_) =>
+                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                        };
+                                        (status, err.to_string()).into_response()
                                     }
                                 }
                             }

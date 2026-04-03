@@ -378,13 +378,15 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                                 #rel_name: #map_name
                                     .get(&row.#source_attr.to_string())
                                     .cloned()
-                                    .ok_or_else(|| -> Box<dyn ::std::error::Error + Send + Sync> {
-                                        format!(
-                                            "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
-                                            #rel_name_str,
-                                            ::std::any::type_name::<#rel_ty>(),
-                                            row.#source_attr,
-                                        ).into()
+                                    .ok_or_else(|| {
+                                        cinderblock_core::ListError::DataLayer(
+                                            format!(
+                                                "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                                #rel_name_str,
+                                                ::std::any::type_name::<#rel_ty>(),
+                                                row.#source_attr,
+                                            ).into(),
+                                        )
                                     })?
                             }
                         }
@@ -404,7 +406,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
                 quote::quote! {
                     impl cinderblock_core::PerformRead<#action_name> for cinderblock_core::data_layer::in_memory::InMemoryDataLayer {
-                        async fn read(&self, args: &<#action_name as cinderblock_core::ReadAction>::Arguments) -> cinderblock_core::Result<<#action_name as cinderblock_core::ReadAction>::Response> {
+                        async fn read(&self, args: &<#action_name as cinderblock_core::ReadAction>::Arguments) -> Result<<#action_name as cinderblock_core::ReadAction>::Response, cinderblock_core::ListError> {
                             let dl = self;
 
                             // Step 1: Load and filter base rows
@@ -417,9 +419,9 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                             #(#relation_loads)*
 
                             // Step 3: Assemble response wrappers
-                            let results: cinderblock_core::Result<Vec<#wrapper_name>> = base_rows
+                            let results: Result<Vec<#wrapper_name>, cinderblock_core::ListError> = base_rows
                                 .into_iter()
-                                .map(|row| -> cinderblock_core::Result<#wrapper_name> {
+                                .map(|row| -> Result<#wrapper_name, cinderblock_core::ListError> {
                                     Ok(#wrapper_name {
                                         #(#relation_field_inits,)*
                                         base: row,
@@ -700,7 +702,12 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     });
 
-    let name_segments = input.name.iter().map(|segment| segment.to_string());
+    let name_segments: Vec<String> = input
+        .name
+        .iter()
+        .map(|segment| segment.to_string())
+        .collect();
+    let resource_name_literal = name_segments.join(".");
 
     // # Data layer selection
     //
@@ -745,6 +752,8 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             type DataLayer = #data_layer_path;
 
             const NAME: &'static [&'static str] = &[#(#name_segments),*];
+
+            const RESOURCE_NAME: &'static str = #resource_name_literal;
 
             const PRIMARY_KEY_GENERATED: bool = #primary_key_generated;
 
