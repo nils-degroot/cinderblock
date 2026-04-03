@@ -306,6 +306,31 @@ impl FieldSchema for uuid::Uuid {
     }
 }
 
+impl<T: FieldSchema> FieldSchema for Option<T> {
+    fn field_schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{Schema, SchemaType, Type};
+
+        let inner = T::field_schema();
+
+        match inner {
+            utoipa::openapi::RefOr::T(Schema::Object(mut obj)) => {
+                // Add `Type::Null` to make the schema nullable in OpenAPI 3.1
+                let nullable_type = match obj.schema_type {
+                    SchemaType::Type(t) => SchemaType::Array(vec![t, Type::Null]),
+                    SchemaType::Array(mut types) => {
+                        types.push(Type::Null);
+                        SchemaType::Array(types)
+                    }
+                    SchemaType::AnyValue => SchemaType::AnyValue,
+                };
+                obj.schema_type = nullable_type;
+                obj.into()
+            }
+            other => other,
+        }
+    }
+}
+
 /// Generic JSON API response envelope.
 ///
 /// Wraps all responses in a `{ "data": ... }` structure so the format is
