@@ -132,7 +132,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
                     quote::quote! { #args_name },
                     quote::quote! {
                         #[derive(::std::fmt::Debug, cinderblock_core::serde::Deserialize)]
-                        struct #args_name {
+                        pub struct #args_name {
                             #(#user_arg_fields,)*
                             #paged_fields
                         }
@@ -221,7 +221,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
                 quote::quote! {
                     #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize)]
-                    struct #wrapper_name {
+                    pub struct #wrapper_name {
                         #[serde(flatten)]
                         pub base: #ident,
                         #(#relation_fields),*
@@ -578,7 +578,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
                 #response_wrapper
 
-                struct #action_name;
+                pub struct #action_name;
 
                 impl cinderblock_core::ReadAction for #action_name {
                     type Output = #ident;
@@ -643,10 +643,10 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             quote::quote! {
                 #[derive(::std::fmt::Debug)]
-                struct #action_name;
+                pub struct #action_name;
 
                 #[derive(::std::fmt::Debug, cinderblock_core::serde::Deserialize)]
-                struct #input_name {
+                pub struct #input_name {
                     #(pub #attributes),*
                 }
 
@@ -727,10 +727,10 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             quote::quote! {
                 #[derive(::std::fmt::Debug)]
-                struct #action_name;
+                pub struct #action_name;
 
                 #[derive(::std::fmt::Debug, cinderblock_core::serde::Deserialize)]
-                struct #input_name {
+                pub struct #input_name {
                     #(pub #field_definitions),*
                 }
 
@@ -755,7 +755,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
             quote::quote! {
                 #[derive(::std::fmt::Debug)]
-                struct #action_name;
+                pub struct #action_name;
 
                 impl cinderblock_core::Destroy<#action_name> for #ident {}
             }
@@ -802,7 +802,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     quote::quote! {
         #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize, cinderblock_core::serde::Deserialize)]
-        struct #ident {
+        pub struct #ident {
             #(#fields),*
         }
 
