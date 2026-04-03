@@ -347,6 +347,34 @@ pub struct ExtensionMacroInput<C: Parse> {
 // # Parsing Helpers
 // ---------------------------------------------------------------------------
 
+/// Parses the contents of an attribute options block (`{ primary_key true; writable false; ... }`)
+/// and applies each setting to the given `base` attribute.
+///
+/// Reused by both the normal attribute path and the `uuid_primary_key` shortcut
+/// override block so that the set of recognised keys stays in one place.
+fn parse_attribute_options(
+    attribute_content: syn::parse::ParseStream,
+    base: &mut ResourceAttributeInput,
+) -> syn::Result<()> {
+    while !attribute_content.is_empty() {
+        let name: Ident = attribute_content.parse()?;
+
+        match name.to_string().as_str() {
+            "primary_key" => base.primary_key = attribute_content.parse()?,
+            "generated" => base.generated = attribute_content.parse()?,
+            "writable" => base.writable = attribute_content.parse()?,
+            "default" => base.default = Some(attribute_content.parse()?),
+            got => Err(syn::Error::new(
+                name.span(),
+                format!("Unexpected attribute key, got `{got}`"),
+            ))?,
+        }
+
+        let _: Token![;] = attribute_content.parse()?;
+    }
+    Ok(())
+}
+
 /// Parses an attribute of the form `<ident> = <value>;` and returns the
 /// key identifier and the parsed value.
 ///
@@ -788,13 +816,33 @@ impl Parse for ResourceMacroInput {
         while !content.is_empty() {
             let name: Ident = content.parse()?;
 
-            let mut base = ResourceAttributeInput {
-                ty: content.parse()?,
-                primary_key: LitBool::new(false, name.span()),
-                generated: LitBool::new(false, name.span()),
-                writable: LitBool::new(true, name.span()),
-                default: None,
-                name,
+            // uuid_primary_key shortcut: expands to Uuid type with
+            // primary_key=true, writable=false, default=|| uuid::Uuid::new_v4()
+            let mut base = if content.peek(Ident)
+                && content
+                    .fork()
+                    .parse::<Ident>()
+                    .is_ok_and(|id| id == "uuid_primary_key")
+            {
+                let _: Ident = content.parse()?;
+
+                ResourceAttributeInput {
+                    ty: syn::parse_quote!(uuid::Uuid),
+                    primary_key: LitBool::new(true, name.span()),
+                    generated: LitBool::new(false, name.span()),
+                    writable: LitBool::new(false, name.span()),
+                    default: Some(syn::parse_quote!(|| uuid::Uuid::new_v4())),
+                    name,
+                }
+            } else {
+                ResourceAttributeInput {
+                    ty: content.parse()?,
+                    primary_key: LitBool::new(false, name.span()),
+                    generated: LitBool::new(false, name.span()),
+                    writable: LitBool::new(true, name.span()),
+                    default: None,
+                    name,
+                }
             };
 
             if content.peek(Token![;]) {
@@ -805,23 +853,7 @@ impl Parse for ResourceMacroInput {
 
             let attribute_content;
             braced!(attribute_content in content);
-
-            while !attribute_content.is_empty() {
-                let name: Ident = attribute_content.parse()?;
-
-                match name.to_string().as_str() {
-                    "primary_key" => base.primary_key = attribute_content.parse()?,
-                    "generated" => base.generated = attribute_content.parse()?,
-                    "writable" => base.writable = attribute_content.parse()?,
-                    "default" => base.default = Some(attribute_content.parse()?),
-                    got => Err(syn::Error::new(
-                        name.span(),
-                        format!("Unexpected attribute key, got `{got}`"),
-                    ))?,
-                }
-
-                let _: Token![;] = attribute_content.parse()?;
-            }
+            parse_attribute_options(&attribute_content, &mut base)?;
 
             attributes.push(base);
 
@@ -2423,5 +2455,95 @@ mod tests {
         let msg = err.to_string();
         check!(msg.contains("undeclared attribute"));
         check!(msg.contains("nonexistent"));
+    }
+
+    // -----------------------------------------------------------------------
+    // uuid_primary_key shortcut tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uuid_primary_key_shortcut() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                ticket_id uuid_primary_key;
+            }
+        });
+
+        check!(input.attributes.len() == 1);
+        let attr = &input.attributes[0];
+        check!(attr.name == "ticket_id");
+        check!(attr.primary_key.value());
+        check!(!attr.writable.value());
+        check!(attr.default.is_some());
+
+        let ty = &attr.ty;
+        let ty_str = quote::quote! { #ty }.to_string();
+        check!(ty_str.contains("Uuid"));
+    }
+
+    #[test]
+    fn uuid_primary_key_with_other_attributes() {
+        let input = parse_resource(quote! {
+            name = Order;
+
+            attributes {
+                order_id uuid_primary_key;
+                item_name String;
+                quantity u32;
+            }
+        });
+
+        check!(input.attributes.len() == 3);
+
+        check!(input.attributes[0].name == "order_id");
+        check!(input.attributes[0].primary_key.value());
+        check!(!input.attributes[0].writable.value());
+
+        check!(input.attributes[1].name == "item_name");
+        check!(!input.attributes[1].primary_key.value());
+        check!(input.attributes[1].writable.value());
+
+        check!(input.attributes[2].name == "quantity");
+        check!(!input.attributes[2].primary_key.value());
+        check!(input.attributes[2].writable.value());
+    }
+
+    #[test]
+    fn uuid_primary_key_with_override_block() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                ticket_id uuid_primary_key {
+                    generated true;
+                }
+            }
+        });
+
+        let attr = &input.attributes[0];
+        check!(attr.primary_key.value());
+        check!(!attr.writable.value());
+        check!(attr.generated.value());
+        check!(attr.default.is_some());
+    }
+
+    #[test]
+    fn uuid_primary_key_override_writable() {
+        let input = parse_resource(quote! {
+            name = Ticket;
+
+            attributes {
+                ticket_id uuid_primary_key {
+                    writable true;
+                }
+            }
+        });
+
+        let attr = &input.attributes[0];
+        check!(attr.writable.value());
+        check!(attr.primary_key.value());
+        check!(attr.default.is_some());
     }
 }
