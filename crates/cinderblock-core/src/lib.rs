@@ -419,6 +419,13 @@ pub trait PerformRead<A: ReadAction> {
     fn read(&self, args: &A::Arguments) -> impl Future<Output = Result<A::Response, ListError>>;
 }
 
+/// Trait indicating that a [`DataLayer`] can perform a get (single-resource)
+/// [`ReadAction`] `A`, returning the resource or `ReadError::NotFound`.
+pub trait PerformReadOne<A: ReadAction> {
+    fn read_one(&self, args: &A::Arguments)
+    -> impl Future<Output = Result<A::Response, ReadError>>;
+}
+
 /// Trait placed on a [`Resource`] specifying how to create the resource using action `A`.
 pub trait Create<A>: Resource {
     /// Input used to create the resource.
@@ -483,6 +490,22 @@ where
 {
     let dl = ctx.get_data_layer::<R::DataLayer>();
     PerformRead::<A>::read(dl, args)
+        .await
+        .map_err(|e| Error::new::<R>(e))
+}
+
+/// Read a single resource `R` by primary key using get-action `A`.
+pub async fn read_one<R, A>(
+    ctx: &Context,
+    args: &A::Arguments,
+) -> Result<A::Response, Error<ReadError>>
+where
+    R: Resource,
+    A: ReadAction<Output = R>,
+    R::DataLayer: PerformReadOne<A>,
+{
+    let dl = ctx.get_data_layer::<R::DataLayer>();
+    PerformReadOne::<A>::read_one(dl, args)
         .await
         .map_err(|e| Error::new::<R>(e))
 }

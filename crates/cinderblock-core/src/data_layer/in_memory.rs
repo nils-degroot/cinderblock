@@ -7,8 +7,8 @@ use std::{
 use tokio::sync::RwLock;
 
 use crate::{
-    DestroyError, ListError, PerformRead, ReadAction, ReadError, Resource, UpdateError,
-    data_layer::DataLayer,
+    DestroyError, ListError, PerformRead, PerformReadOne, ReadAction, ReadError, Resource,
+    UpdateError, data_layer::DataLayer,
 };
 
 type State =
@@ -158,5 +158,20 @@ where
             .cloned();
 
         Ok(A::execute(all, args))
+    }
+}
+
+/// Single `PerformReadOne` impl for `InMemoryDataLayer` that delegates
+/// to the underlying `DataLayer::read` by primary key.
+///
+/// Get-actions set `Arguments = PrimaryKey` and `Response = Resource`,
+/// so this blanket impl covers all get-actions without per-action codegen.
+impl<R, A> PerformReadOne<A> for InMemoryDataLayer
+where
+    R: Resource + 'static,
+    A: ReadAction<Output = R, Arguments = R::PrimaryKey, Response = R> + 'static,
+{
+    async fn read_one(&self, args: &A::Arguments) -> Result<A::Response, ReadError> {
+        <Self as DataLayer<R>>::read(self, args).await
     }
 }

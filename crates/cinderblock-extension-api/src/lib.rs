@@ -119,6 +119,12 @@ pub struct ActionRead {
     /// `relations { ... }` block. When empty, only the base resource columns
     /// are returned.
     pub load: Vec<Ident>,
+    /// When `true`, this read action fetches a single resource by primary key
+    /// instead of returning a list.
+    ///
+    /// Parsed from `get;` inside a read action body. Mutually exclusive with
+    /// `paged`, `filter`, `order`, `argument`, and `load`.
+    pub get: bool,
 }
 
 /// Configuration for paged read actions.
@@ -380,6 +386,7 @@ impl Parse for ResourceActionInput {
                         orders: vec![],
                         paged: None,
                         load: vec![],
+                        get: false,
                     })
                 } else {
                     let content;
@@ -391,6 +398,7 @@ impl Parse for ResourceActionInput {
                         orders: vec![],
                         paged: None,
                         load: vec![],
+                        get: false,
                     };
 
                     while !content.is_empty() {
@@ -545,6 +553,10 @@ impl Parse for ResourceActionInput {
 
                                 let _: Token![;] = content.parse()?;
                             }
+                            "get" => {
+                                let _: Token![;] = content.parse()?;
+                                action.get = true;
+                            }
                             got => {
                                 return Err(syn::Error::new(
                                     key.span(),
@@ -568,6 +580,29 @@ impl Parse for ResourceActionInput {
                                 ),
                             ));
                         }
+                    }
+
+                    if action.get {
+                        macro_rules! reject_with_get {
+                            ($cond:expr, $keyword:literal) => {
+                                if $cond {
+                                    return Err(syn::Error::new(
+                                        name.span(),
+                                        concat!(
+                                            "`get` is mutually exclusive with `",
+                                            $keyword,
+                                            "`"
+                                        ),
+                                    ));
+                                }
+                            };
+                        }
+
+                        reject_with_get!(action.paged.is_some(), "paged");
+                        reject_with_get!(!action.filters.is_empty(), "filter");
+                        reject_with_get!(!action.orders.is_empty(), "order");
+                        reject_with_get!(!action.arguments.is_empty(), "argument");
+                        reject_with_get!(!action.load.is_empty(), "load");
                     }
 
                     if input.peek(Token![;]) {

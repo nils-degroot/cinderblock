@@ -264,6 +264,21 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
+            // Get-actions delegate to `execute_sql_read_one` — no filters,
+            // no ordering, just a primary key lookup.
+            if action_read.get {
+                return quote::quote! {
+                    impl cinderblock_sqlx::SqlPerformReadOne for #action_name {
+                        async fn execute(
+                            pool: &cinderblock_sqlx::sqlx::SqlitePool,
+                            args: &Self::Arguments,
+                        ) -> Result<Self::Response, cinderblock_core::ReadError> {
+                            cinderblock_sqlx::execute_sql_read_one::<#ident>(pool, args).await
+                        }
+                    }
+                };
+            }
+
             let has_loads = !action_read.load.is_empty();
 
             // # SQL filter generation

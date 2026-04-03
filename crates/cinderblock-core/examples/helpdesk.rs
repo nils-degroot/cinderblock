@@ -31,6 +31,10 @@ resource! {
             filter { status == arg(status) };
         };
 
+        read one {
+            get;
+        };
+
         create open;
 
         create assign {
@@ -90,6 +94,14 @@ async fn main() {
     for ticket in &tickets {
         println!("{ticket}\n");
     }
+
+    // Demonstrate fetching a single ticket by primary key.
+    let first_id = tickets[0].ticket_id;
+    let fetched = cinderblock_core::read_one::<Ticket, One>(&ctx, &first_id)
+        .await
+        .expect("Failed to fetch ticket by id");
+
+    println!("Fetched single ticket: {}\n", fetched.subject);
 
     // Demonstrate runtime arguments — query by status.
     let closed_tickets = cinderblock_core::read::<Ticket, ByStatus>(

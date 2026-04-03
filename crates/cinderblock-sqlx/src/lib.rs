@@ -262,6 +262,39 @@ where
     Ok(result)
 }
 
+/// Execute a single-resource SQL read query by primary key.
+///
+/// Builds `SELECT * FROM table WHERE pk_col = ?` and decodes via
+/// [`SqlResource::from_row`]. Returns `ReadError::NotFound` if no row matches.
+pub async fn execute_sql_read_one<R>(
+    pool: &sqlx::SqlitePool,
+    pk: &R::PrimaryKey,
+) -> Result<R, cinderblock_core::ReadError>
+where
+    R: SqlResource + cinderblock_core::Resource,
+{
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT * FROM {} WHERE {} = ",
+        R::TABLE_NAME,
+        R::PRIMARY_KEY_COLUMN,
+    ));
+    R::bind_primary_key(pk, &mut builder);
+
+    let row: Option<sqlx::sqlite::SqliteRow> =
+        builder.build().fetch_optional(pool).await.map_err(|e| {
+            cinderblock_core::ReadError::DataLayer(
+                format!("read from `{}`: {e}", R::TABLE_NAME).into(),
+            )
+        })?;
+
+    match row {
+        Some(row) => R::from_row(&row).map_err(cinderblock_core::ReadError::DataLayer),
+        None => Err(cinderblock_core::ReadError::NotFound {
+            primary_key: pk.to_string(),
+        }),
+    }
+}
+
 /// Execute a paged SQL read query using the filters from [`SqlPagedReadAction`].
 ///
 /// Runs a `COUNT(*)` query for the total, then a `LIMIT/OFFSET` query for
@@ -349,4 +382,17 @@ pub trait SqlPerformRead: ReadAction {
         pool: &sqlx::SqlitePool,
         args: &Self::Arguments,
     ) -> impl std::future::Future<Output = Result<Self::Response, cinderblock_core::ListError>> + Send;
+}
+
+/// Unified execution trait for get (single-resource) read actions.
+///
+/// Similar to [`SqlPerformRead`] but returns a single resource or
+/// `ReadError::NotFound`. The `cinderblock_sqlx` extension macro generates
+/// impls of this trait for get-actions. A blanket `PerformReadOne` impl on
+/// `SqliteDataLayer` dispatches to this trait.
+pub trait SqlPerformReadOne: ReadAction {
+    fn execute(
+        pool: &sqlx::SqlitePool,
+        args: &Self::Arguments,
+    ) -> impl std::future::Future<Output = Result<Self::Response, cinderblock_core::ReadError>> + Send;
 }
