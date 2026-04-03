@@ -971,9 +971,12 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         let is_paged = action_read.paged.is_some();
 
                         // Query parameters for read action arguments.
+                        //
+                        // Parameter names use the original Rust field name
+                        // (snake_case) so that the OpenAPI spec matches what
+                        // serde actually deserializes from the query string.
                         let query_params: Vec<_> = action_read.arguments.iter().map(|arg| {
-                            let arg_name_str = arg.name.to_string();
-                            let arg_name_kebab = convert_case::ccase!(kebab, &arg_name_str);
+                            let arg_param_name = arg.name.to_string();
                             let is_optional = is_option_type(&arg.ty);
 
                             let schema_type = if is_optional {
@@ -991,7 +994,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             quote::quote! {
                                 .parameter(
                                     cinderblock_json_api::utoipa::openapi::path::ParameterBuilder::new()
-                                        .name(#arg_name_kebab)
+                                        .name(#arg_param_name)
                                         .parameter_in(cinderblock_json_api::utoipa::openapi::path::ParameterIn::Query)
                                         .required(#required_value)
                                         .schema(Some(<#schema_type as cinderblock_json_api::FieldSchema>::field_schema()))
