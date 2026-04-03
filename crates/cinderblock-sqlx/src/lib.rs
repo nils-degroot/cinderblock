@@ -175,7 +175,9 @@ pub trait SqlResource: cinderblock_core::Resource {
     );
 
     /// Decode all columns from a row and reconstruct the resource.
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> cinderblock_core::Result<Self>;
+    fn from_row(
+        row: &sqlx::sqlite::SqliteRow,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 pub trait SqlReadAction: ReadAction
@@ -220,7 +222,7 @@ where
 pub async fn execute_sql_read<A>(
     pool: &sqlx::SqlitePool,
     args: &A::Arguments,
-) -> cinderblock_core::Result<Vec<A::Output>>
+) -> Result<Vec<A::Output>, cinderblock_core::ListError>
 where
     A: SqlReadAction,
     A::Output: SqlResource,
@@ -233,15 +235,21 @@ where
 
     let rows: Vec<sqlx::sqlite::SqliteRow> =
         builder.build().fetch_all(pool).await.map_err(|e| {
-            format!(
-                "read from `{}`: {e}",
-                <A::Output as SqlResource>::TABLE_NAME,
+            cinderblock_core::ListError::DataLayer(
+                format!(
+                    "read from `{}`: {e}",
+                    <A::Output as SqlResource>::TABLE_NAME,
+                )
+                .into(),
             )
         })?;
 
     let mut result = Vec::with_capacity(rows.len());
     for row in &rows {
-        result.push(<A::Output as SqlResource>::from_row(row)?);
+        result.push(
+            <A::Output as SqlResource>::from_row(row)
+                .map_err(cinderblock_core::ListError::DataLayer)?,
+        );
     }
     Ok(result)
 }
@@ -253,7 +261,7 @@ where
 pub async fn execute_sql_paged_read<A>(
     pool: &sqlx::SqlitePool,
     args: &A::Arguments,
-) -> cinderblock_core::Result<cinderblock_core::PaginatedResult<A::Output>>
+) -> Result<cinderblock_core::PaginatedResult<A::Output>, cinderblock_core::ListError>
 where
     A: SqlPagedReadAction,
     A::Output: SqlResource,
@@ -273,9 +281,15 @@ where
             .build()
             .fetch_one(pool)
             .await
-            .map_err(|e| format!("count from `{table}`: {e}"))?
+            .map_err(|e| {
+                cinderblock_core::ListError::DataLayer(format!("count from `{table}`: {e}").into())
+            })?
             .try_get(0)
-            .map_err(|e| format!("decode count from `{table}`: {e}"))?
+            .map_err(|e| {
+                cinderblock_core::ListError::DataLayer(
+                    format!("decode count from `{table}`: {e}").into(),
+                )
+            })?
     };
     let total = total as u64;
 
@@ -289,15 +303,17 @@ where
     A::bind_filters(&mut builder, args);
     builder.push(format!(" LIMIT {} OFFSET {}", per_page, offset));
 
-    let rows: Vec<sqlx::sqlite::SqliteRow> = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("paged read from `{table}`: {e}"))?;
+    let rows: Vec<sqlx::sqlite::SqliteRow> =
+        builder.build().fetch_all(pool).await.map_err(|e| {
+            cinderblock_core::ListError::DataLayer(format!("paged read from `{table}`: {e}").into())
+        })?;
 
     let mut data = Vec::with_capacity(rows.len());
     for row in &rows {
-        data.push(<A::Output as SqlResource>::from_row(row)?);
+        data.push(
+            <A::Output as SqlResource>::from_row(row)
+                .map_err(cinderblock_core::ListError::DataLayer)?,
+        );
     }
 
     Ok(PaginatedResult {
@@ -323,5 +339,5 @@ pub trait SqlPerformRead: ReadAction {
     fn execute(
         pool: &sqlx::SqlitePool,
         args: &Self::Arguments,
-    ) -> impl std::future::Future<Output = cinderblock_core::Result<Self::Response>> + Send;
+    ) -> impl std::future::Future<Output = Result<Self::Response, cinderblock_core::ListError>> + Send;
 }

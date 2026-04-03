@@ -13,13 +13,18 @@ pub trait DataLayer<R: Resource>: std::fmt::Debug + Send + Sync + 'static {
     ///
     /// The returned resource may differ from the input when the data layer
     /// provides server-generated values (e.g. autoincrement primary keys).
-    fn create(&self, resource: R) -> impl Future<Output = crate::Result<R>> + Send;
+    fn create(&self, resource: R) -> impl Future<Output = Result<R, crate::CreateError>> + Send;
 
-    fn read(&self, primary_key: &R::PrimaryKey) -> impl Future<Output = crate::Result<R>> + Send;
+    fn read(
+        &self,
+        primary_key: &R::PrimaryKey,
+    ) -> impl Future<Output = Result<R, crate::ReadError>> + Send;
 
-    fn update(&self, resource: R) -> impl Future<Output = crate::Result<()>> + Send;
+    fn update(&self, resource: R) -> impl Future<Output = Result<(), crate::UpdateError>> + Send;
 
     /// Remove a resource by primary key, returning the deleted resource.
-    fn destroy(&self, primary_key: &R::PrimaryKey)
-    -> impl Future<Output = crate::Result<R>> + Send;
+    fn destroy(
+        &self,
+        primary_key: &R::PrimaryKey,
+    ) -> impl Future<Output = Result<R, crate::DestroyError>> + Send;
 }

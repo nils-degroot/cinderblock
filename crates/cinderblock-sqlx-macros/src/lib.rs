@@ -220,8 +220,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
     // # from_row
     //
     // Generates a `row.try_get("column")` call for each attribute. We
-    // map sqlx errors to our `cinderblock_core::Result` error type with a
-    // descriptive message including the column name.
+    // map sqlx errors to a boxed error type with a descriptive message
+    // including the column name. Callers wrap this into their
+    // action-specific error variant.
     let from_row_fields: Vec<_> = resource
         .attributes
         .iter()
@@ -230,7 +231,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             let col = attr.name.to_string();
             quote::quote! {
                 #field: row.try_get(#col)
-                    .map_err(|e| format!("decode column `{}`: {e}", #col))?,
+                    .map_err(|e| -> Box<dyn ::std::error::Error + Send + Sync> {
+                        format!("decode column `{}`: {e}", #col).into()
+                    })?,
             }
         })
         .collect();
@@ -416,16 +419,19 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                             .build()
                                             .fetch_all(pool)
                                             .await
-                                            .map_err(|e| -> Box<dyn ::std::error::Error + Send + Sync> {
-                                                format!(
-                                                    "load belongs_to relation from `{}`: {e}",
-                                                    related_table,
-                                                ).into()
+                                            .map_err(|e| {
+                                                cinderblock_core::ListError::DataLayer(
+                                                    format!(
+                                                        "load belongs_to relation from `{}`: {e}",
+                                                        related_table,
+                                                    ).into(),
+                                                )
                                             })?;
 
                                         let mut map = ::std::collections::HashMap::with_capacity(rows.len());
                                         for row in &rows {
-                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)?;
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                                .map_err(cinderblock_core::ListError::DataLayer)?;
                                             use cinderblock_core::Resource;
                                             map.insert(related.primary_key().to_string(), related);
                                         }
@@ -477,17 +483,20 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                             .build()
                                             .fetch_all(pool)
                                             .await
-                                            .map_err(|e| -> Box<dyn ::std::error::Error + Send + Sync> {
-                                                format!(
-                                                    "load has_many relation from `{}`: {e}",
-                                                    related_table,
-                                                ).into()
+                                            .map_err(|e| {
+                                                cinderblock_core::ListError::DataLayer(
+                                                    format!(
+                                                        "load has_many relation from `{}`: {e}",
+                                                        related_table,
+                                                    ).into(),
+                                                )
                                             })?;
 
                                         let mut map: ::std::collections::HashMap<String, Vec<#rel_ty>> =
                                             ::std::collections::HashMap::new();
                                         for row in &rows {
-                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)?;
+                                            let related = <#rel_ty as cinderblock_sqlx::SqlResource>::from_row(row)
+                                                .map_err(cinderblock_core::ListError::DataLayer)?;
                                             let key = related.#source_attr.to_string();
                                             map.entry(key).or_default().push(related);
                                         }
@@ -516,13 +525,15 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 #rel_name: #map_name
                                     .get(&row.#source_attr.to_string())
                                     .cloned()
-                                    .ok_or_else(|| -> Box<dyn ::std::error::Error + Send + Sync> {
-                                        format!(
-                                            "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
-                                            #rel_name_str,
-                                            ::std::any::type_name::<#rel_ty>(),
-                                            row.#source_attr,
-                                        ).into()
+                                    .ok_or_else(|| {
+                                        cinderblock_core::ListError::DataLayer(
+                                            format!(
+                                                "belongs_to relation `{}` of type `{}`: no record found for FK value `{}`",
+                                                #rel_name_str,
+                                                ::std::any::type_name::<#rel_ty>(),
+                                                row.#source_attr,
+                                            ).into(),
+                                        )
                                     })?
                             }
                         }
@@ -545,7 +556,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         async fn execute(
                             pool: &cinderblock_sqlx::sqlx::SqlitePool,
                             args: &Self::Arguments,
-                        ) -> cinderblock_core::Result<Self::Response> {
+                        ) -> Result<Self::Response, cinderblock_core::ListError> {
                             use cinderblock_sqlx::sqlx::Row;
 
                             // Step 1: Run the base query with filters
@@ -564,15 +575,20 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                     .fetch_all(pool)
                                     .await
                                     .map_err(|e| {
-                                        format!(
-                                            "read from `{}`: {e}",
-                                            <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                        cinderblock_core::ListError::DataLayer(
+                                            format!(
+                                                "read from `{}`: {e}",
+                                                <#ident as cinderblock_sqlx::SqlResource>::TABLE_NAME,
+                                            ).into(),
                                         )
                                     })?;
 
                                 let mut result = Vec::with_capacity(rows.len());
                                 for row in &rows {
-                                    result.push(<#ident as cinderblock_sqlx::SqlResource>::from_row(row)?);
+                                    result.push(
+                                        <#ident as cinderblock_sqlx::SqlResource>::from_row(row)
+                                            .map_err(cinderblock_core::ListError::DataLayer)?
+                                    );
                                 }
                                 result
                             };
@@ -581,9 +597,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             #(#relation_loads)*
 
                             // Step 3: Assemble response wrappers
-                            let results: cinderblock_core::Result<Vec<#wrapper_name>> = base_rows
+                            let results: Result<Vec<#wrapper_name>, cinderblock_core::ListError> = base_rows
                                 .into_iter()
-                                .map(|row| -> cinderblock_core::Result<#wrapper_name> {
+                                .map(|row| -> Result<#wrapper_name, cinderblock_core::ListError> {
                                     Ok(#wrapper_name {
                                         #(#relation_field_inits,)*
                                         base: row,
@@ -632,7 +648,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         async fn execute(
                             pool: &cinderblock_sqlx::sqlx::SqlitePool,
                             args: &Self::Arguments,
-                        ) -> cinderblock_core::Result<Self::Response> {
+                        ) -> Result<Self::Response, cinderblock_core::ListError> {
                             #perform_read_body
                         }
                     }
@@ -672,7 +688,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
             fn from_row(
                 row: &cinderblock_sqlx::sqlx::sqlite::SqliteRow,
-            ) -> cinderblock_core::Result<Self> {
+            ) -> Result<Self, Box<dyn ::std::error::Error + Send + Sync>> {
                 use cinderblock_sqlx::sqlx::Row;
                 Ok(Self {
                     #(#from_row_fields)*

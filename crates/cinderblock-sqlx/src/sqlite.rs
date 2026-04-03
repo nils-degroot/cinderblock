@@ -4,7 +4,10 @@
 // Queries are built dynamically using `sqlx::QueryBuilder` and the column
 // metadata / bind helpers provided by the generated `SqlResource` impl.
 
-use cinderblock_core::{PerformRead, ReadAction, Resource, data_layer::DataLayer};
+use cinderblock_core::{
+    CreateError, DestroyError, ListError, PerformRead, ReadAction, ReadError, Resource,
+    UpdateError, data_layer::DataLayer,
+};
 use sqlx::{SqlitePool, sqlite::SqliteRow};
 
 use crate::{SqlPerformRead, SqlResource};
@@ -36,7 +39,7 @@ impl SqliteDataLayer {
     /// The `url` follows sqlx's connection string format:
     /// - `sqlite::memory:` for an in-memory database
     /// - `sqlite:path/to/file.db` for a file-backed database
-    pub async fn new(url: &str) -> cinderblock_core::Result<Self> {
+    pub async fn new(url: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let pool = SqlitePool::connect(url)
             .await
             .map_err(|e| format!("connect to SQLite database: {e}"))?;
@@ -71,7 +74,7 @@ where
     //
     // The RETURNING * clause lets us get back the full row including
     // database-generated values in a single round-trip.
-    async fn create(&self, resource: R) -> cinderblock_core::Result<R> {
+    async fn create(&self, resource: R) -> Result<R, CreateError> {
         let columns = R::INSERT_COLUMN_NAMES.join(", ");
 
         let mut builder = sqlx::QueryBuilder::new(format!(
@@ -83,19 +86,17 @@ where
         resource.bind_insert(&mut builder);
         builder.push(") RETURNING *");
 
-        let row: SqliteRow = builder
-            .build()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| format!("insert into `{}`: {e}", R::TABLE_NAME))?;
+        let row: SqliteRow = builder.build().fetch_one(&self.pool).await.map_err(|e| {
+            CreateError::DataLayer(format!("insert into `{}`: {e}", R::TABLE_NAME).into())
+        })?;
 
-        R::from_row(&row)
+        R::from_row(&row).map_err(CreateError::DataLayer)
     }
 
     // # SELECT by primary key
     //
     // Builds: SELECT * FROM {table} WHERE {pk_col} = ?
-    async fn read(&self, primary_key: &R::PrimaryKey) -> cinderblock_core::Result<R> {
+    async fn read(&self, primary_key: &R::PrimaryKey) -> Result<R, ReadError> {
         let mut builder = sqlx::QueryBuilder::new(format!(
             "SELECT * FROM {} WHERE {} = ",
             R::TABLE_NAME,
@@ -104,13 +105,21 @@ where
 
         R::bind_primary_key(primary_key, &mut builder);
 
-        let row: SqliteRow = builder
-            .build()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| format!("read from `{}`: {e}", R::TABLE_NAME))?;
+        let row: Option<SqliteRow> =
+            builder
+                .build()
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| {
+                    ReadError::DataLayer(format!("read from `{}`: {e}", R::TABLE_NAME).into())
+                })?;
 
-        R::from_row(&row)
+        match row {
+            Some(row) => R::from_row(&row).map_err(ReadError::DataLayer),
+            None => Err(ReadError::NotFound {
+                primary_key: primary_key.to_string(),
+            }),
+        }
     }
 
     // # UPDATE
@@ -119,7 +128,7 @@ where
     //
     // `bind_update` emits the `col = ?` pairs for non-PK columns, then
     // we append the WHERE clause and bind the primary key separately.
-    async fn update(&self, resource: R) -> cinderblock_core::Result<()> {
+    async fn update(&self, resource: R) -> Result<(), UpdateError> {
         let mut builder = sqlx::QueryBuilder::new(format!("UPDATE {} SET ", R::TABLE_NAME));
 
         resource.bind_update(&mut builder);
@@ -127,11 +136,9 @@ where
         builder.push(format!(" WHERE {} = ", R::PRIMARY_KEY_COLUMN));
         R::bind_primary_key(resource.primary_key(), &mut builder);
 
-        builder
-            .build()
-            .execute(&self.pool)
-            .await
-            .map_err(|e| format!("update `{}`: {e}", R::TABLE_NAME))?;
+        builder.build().execute(&self.pool).await.map_err(|e| {
+            UpdateError::DataLayer(format!("update `{}`: {e}", R::TABLE_NAME).into())
+        })?;
 
         Ok(())
     }
@@ -142,7 +149,7 @@ where
     //
     // SQLite supports RETURNING since version 3.35 (2021-03-12). This
     // lets us atomically delete and return the resource in a single query.
-    async fn destroy(&self, primary_key: &R::PrimaryKey) -> cinderblock_core::Result<R> {
+    async fn destroy(&self, primary_key: &R::PrimaryKey) -> Result<R, DestroyError> {
         let mut builder = sqlx::QueryBuilder::new(format!(
             "DELETE FROM {} WHERE {} = ",
             R::TABLE_NAME,
@@ -152,13 +159,21 @@ where
         R::bind_primary_key(primary_key, &mut builder);
         builder.push(" RETURNING *");
 
-        let row: SqliteRow = builder
-            .build()
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| format!("destroy from `{}`: {e}", R::TABLE_NAME))?;
+        let row: Option<SqliteRow> =
+            builder
+                .build()
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| {
+                    DestroyError::DataLayer(format!("destroy from `{}`: {e}", R::TABLE_NAME).into())
+                })?;
 
-        R::from_row(&row)
+        match row {
+            Some(row) => R::from_row(&row).map_err(DestroyError::DataLayer),
+            None => Err(DestroyError::NotFound {
+                primary_key: primary_key.to_string(),
+            }),
+        }
     }
 }
 
@@ -172,7 +187,7 @@ where
     R: Resource + SqlResource + 'static,
     A: ReadAction<Output = R> + SqlPerformRead + 'static,
 {
-    async fn read(&self, args: &A::Arguments) -> cinderblock_core::Result<A::Response> {
+    async fn read(&self, args: &A::Arguments) -> Result<A::Response, ListError> {
         A::execute(&self.pool, args).await
     }
 }
