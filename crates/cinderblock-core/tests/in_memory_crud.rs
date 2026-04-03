@@ -779,3 +779,101 @@ async fn paged_order_maintains_sort_across_pages() {
         .collect();
     check!(all_names.windows(2).all(|w| w[0] <= w[1]));
 }
+
+// ---------------------------------------------------------------------------
+// # Lifecycle Hook Tests
+// ---------------------------------------------------------------------------
+
+resource! {
+    name = Test.Hooks.Stamped;
+
+    attributes {
+        stamped_id Uuid {
+            primary_key true;
+            writable false;
+            default || uuid::Uuid::new_v4();
+        }
+        title String;
+        stamp String;
+    }
+
+    before_create |resource| {
+        resource.stamp = String::from("created");
+    };
+
+    before_update |resource| {
+        resource.stamp = String::from("updated");
+    };
+
+    actions {
+        create add_stamped;
+        update edit_stamped;
+    }
+}
+
+#[tokio::test]
+async fn before_create_hook_mutates_resource_before_persistence() {
+    let ctx = fresh_ctx();
+
+    let item = cinderblock_core::create::<Stamped, AddStamped>(
+        AddStampedInput {
+            title: "Test".into(),
+            stamp: "initial".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create stamped");
+
+    check!(item.stamp == "created");
+}
+
+#[tokio::test]
+async fn before_update_hook_mutates_resource_before_persistence() {
+    let ctx = fresh_ctx();
+
+    let item = cinderblock_core::create::<Stamped, AddStamped>(
+        AddStampedInput {
+            title: "Test".into(),
+            stamp: "initial".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create stamped");
+
+    check!(item.stamp == "created");
+
+    let updated = cinderblock_core::update::<Stamped, EditStamped>(
+        &item.stamped_id,
+        EditStampedInput {
+            title: "Edited".into(),
+            stamp: "should-be-overwritten".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("update stamped");
+
+    check!(updated.title == "Edited");
+    check!(updated.stamp == "updated");
+}
+
+#[tokio::test]
+async fn resource_without_hooks_is_unaffected() {
+    let ctx = fresh_ctx();
+
+    let item = cinderblock_core::create::<Item, Add>(
+        AddInput {
+            label: "No hooks".into(),
+            category: Category::General,
+            active: true,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create item without hooks");
+
+    check!(item.label == "No hooks");
+    check!(item.active == true);
+}

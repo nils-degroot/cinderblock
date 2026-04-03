@@ -394,6 +394,16 @@ pub trait Resource:
 
     /// Mathos that returns the primary key of the resource
     fn primary_key(&self) -> &Self::PrimaryKey;
+
+    /// Lifecycle hook called on every create action, after the resource is
+    /// built from input but before persistence. Override to mutate the
+    /// resource (e.g. set `created_at` timestamps).
+    fn before_create(&mut self) {}
+
+    /// Lifecycle hook called on every update action, after
+    /// `apply_update_input` but before persistence. Override to mutate the
+    /// resource (e.g. set `updated_at` timestamps).
+    fn before_update(&mut self) {}
 }
 
 /// Marker trait indicating that a struct is a read action.
@@ -452,7 +462,8 @@ pub async fn create<R, A>(input: R::Input, ctx: &Context) -> Result<R, Error<Cre
 where
     R: Create<A>,
 {
-    let resource = R::from_create_input(input);
+    let mut resource = R::from_create_input(input);
+    resource.before_create();
     let dl = ctx.get_data_layer::<R::DataLayer>();
     dl.create(resource).await.map_err(|e| Error::new::<R>(e))
 }
@@ -475,6 +486,7 @@ where
         })
     })?;
     resource.apply_update_input(input);
+    resource.before_update();
     dl.update(resource.clone())
         .await
         .map_err(|e| Error::new::<R>(e))?;

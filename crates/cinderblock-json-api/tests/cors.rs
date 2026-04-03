@@ -1,10 +1,7 @@
 #![cfg(feature = "cors")]
 
 use assert2::check;
-use cinderblock_core::{
-    Context, resource,
-    serde::{Deserialize, Serialize},
-};
+use cinderblock_core::{Context, resource};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use uuid::Uuid;
