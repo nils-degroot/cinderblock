@@ -418,11 +418,55 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
             let handler_and_method = match &action_def.kind {
                 ResourceActionInputKind::Read(action_read) => {
+                    let is_get = action_read.get;
                     let is_paged = action_read.paged.is_some();
                     let has_user_arguments = !action_read.arguments.is_empty();
                     let needs_arguments_struct = has_user_arguments || is_paged;
 
-                    let handler = if is_paged {
+                    let handler = if is_get {
+                        quote::quote! {
+                            move |
+                                cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<
+                                    <#ident as cinderblock_core::Resource>::PrimaryKey,
+                                >,
+                            | {
+                                let ctx = ctx.clone();
+                                async move {
+                                    cinderblock_json_api::tracing::info!(
+                                        resource = stringify!(#ident),
+                                        action = #action_name_str,
+                                        %primary_key,
+                                        "handling get request"
+                                    );
+
+                                    match cinderblock_core::read_one::<#ident, #action_type>(&ctx, &primary_key).await {
+                                        Ok(result) => (
+                                            cinderblock_json_api::axum::http::StatusCode::OK,
+                                            cinderblock_json_api::axum::Json(
+                                                cinderblock_json_api::Response { data: result },
+                                            ),
+                                        )
+                                            .into_response(),
+                                        Err(err) => {
+                                            cinderblock_json_api::tracing::error!(
+                                                resource = stringify!(#ident),
+                                                action = #action_name_str,
+                                                error = %err,
+                                                "get request failed"
+                                            );
+                                            let status = match err.data() {
+                                                cinderblock_core::ReadError::NotFound { .. } =>
+                                                    cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                                                cinderblock_core::ReadError::DataLayer(_) =>
+                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                            };
+                                            (status, err.to_string()).into_response()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if is_paged {
                         // Paged reads always have an Arguments struct
                         // (with at least page/per_page fields).
                         let args_type =
@@ -968,7 +1012,57 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
 
                 match &action_def.kind {
                     ResourceActionInputKind::Read(action_read) => {
+                        let is_get = action_read.get;
                         let is_paged = action_read.paged.is_some();
+
+                        if is_get {
+                            quote::quote! {
+                                .path(
+                                    #full_path,
+                                    cinderblock_json_api::utoipa::openapi::PathItem::new(
+                                        #http_method,
+                                        cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
+                                            .operation_id(Some(#operation_id))
+                                            .tag(#ident_str)
+                                            .summary(Some(format!("Get {} via {}", #ident_str, #action_name_str)))
+                                            #pk_parameter
+                                            .response(
+                                                "200",
+                                                cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
+                                                    .description(format!("Single {}", #ident_str))
+                                                    .content(
+                                                        "application/json",
+                                                        cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
+                                                            .schema(Some(
+                                                                cinderblock_json_api::utoipa::openapi::RefOr::<cinderblock_json_api::utoipa::openapi::schema::Schema>::from(
+                                                                    cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
+                                                                        .schema_type(
+                                                                            cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
+                                                                                cinderblock_json_api::utoipa::openapi::schema::Type::Object,
+                                                                            ),
+                                                                        )
+                                                                        .property(
+                                                                            "data",
+                                                                            <#ident as cinderblock_json_api::utoipa::PartialSchema>::schema(),
+                                                                        )
+                                                                        .required("data")
+                                                                )
+                                                            ))
+                                                            .build(),
+                                                    )
+                                                    .build(),
+                                            )
+                                            .response(
+                                                "404",
+                                                cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
+                                                    .description("Not found")
+                                                    .build(),
+                                            )
+                                        .build(),
+                                ),
+                            )
+                            }
+                        } else {
 
                         // Query parameters for read action arguments.
                         //
@@ -1085,6 +1179,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                 ),
                             )
                         }
+                    }
                     }
                     ResourceActionInputKind::Create { accept } => {
                         let action_type_name = convert_case::ccase!(pascal, &action_name_str);

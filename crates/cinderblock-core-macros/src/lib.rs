@@ -96,8 +96,27 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let action_name = convert_case::ccase!(pascal, action.name.to_string());
             let action_name = Ident::new(&action_name, action.name.span());
 
+            let is_get = read_action.get;
             let is_paged = read_action.paged.is_some();
             let has_loads = !read_action.load.is_empty();
+
+            // # Get-action fast path
+            //
+            // Get-actions use `PrimaryKey` as Arguments and the resource
+            // itself as Response. No Arguments struct, no filter codegen,
+            // no in-memory data layer traits — the blanket
+            // `PerformReadOne` impl on InMemoryDataLayer handles it.
+            if is_get {
+                return quote::quote! {
+                    struct #action_name;
+
+                    impl cinderblock_core::ReadAction for #action_name {
+                        type Output = #ident;
+                        type Arguments = <#ident as cinderblock_core::Resource>::PrimaryKey;
+                        type Response = #ident;
+                    }
+                };
+            }
 
             // # Arguments struct generation
             //

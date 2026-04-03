@@ -94,6 +94,10 @@ resource! {
             load [agent];
         };
 
+        read one {
+            get;
+        };
+
         create open;
 
         create assign {
@@ -115,6 +119,7 @@ resource! {
         cinderblock_json_api {
             route = { method = GET; path = "/"; action = all; };
             route = { method = GET; path = "/with-agent"; action = all_with_agent; };
+            route = { method = GET; path = "/{primary_key}"; action = one; };
             route = { method = POST; path = "/"; action = open; };
             route = { method = POST; path = "/assign"; action = assign; };
             route = { method = PATCH; path = "/{primary_key}"; action = close; };
@@ -200,6 +205,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Seeded 2 agents and 3 tickets");
 
+    // Demonstrate read_one: fetch a single ticket by ID.
+    let first_ticket = cinderblock_core::read::<Ticket, All>(
+        &ctx,
+        &AllArguments {
+            status: TicketStatus::Open,
+        },
+    )
+    .await
+    .expect("Failed to list tickets");
+
+    if let Some(ticket) = first_ticket.first() {
+        let fetched = cinderblock_core::read_one::<Ticket, One>(&ctx, &ticket.ticket_id)
+            .await
+            .expect("Failed to fetch single ticket");
+        println!(
+            "Fetched ticket by ID: {} — {}",
+            fetched.ticket_id, fetched.subject
+        );
+    }
+
     // Build the JSON API router — this auto-discovers all resources that
     // declared `cinderblock_json_api` in their extensions block.
     let router = cinderblock_json_api::router(ctx);
@@ -220,6 +245,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!();
     println!("  # List tickets with their agent loaded (belongs_to)");
     println!("  curl http://localhost:3000/helpdesk/support/ticket/with-agent");
+    println!();
+    println!("  # Fetch a single ticket by ID");
+    println!("  curl http://localhost:3000/helpdesk/support/ticket/{{ticket-uuid-here}}");
     println!();
     println!("  # Create a ticket");
     println!("  curl -X POST http://localhost:3000/helpdesk/support/ticket/ \\");

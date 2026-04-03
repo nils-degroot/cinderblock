@@ -5,12 +5,12 @@
 // metadata / bind helpers provided by the generated `SqlResource` impl.
 
 use cinderblock_core::{
-    CreateError, DestroyError, ListError, PerformRead, ReadAction, ReadError, Resource,
-    UpdateError, data_layer::DataLayer,
+    CreateError, DestroyError, ListError, PerformRead, PerformReadOne, ReadAction, ReadError,
+    Resource, UpdateError, data_layer::DataLayer,
 };
 use sqlx::{SqlitePool, sqlite::SqliteRow};
 
-use crate::{SqlPerformRead, SqlResource};
+use crate::{SqlPerformRead, SqlPerformReadOne, SqlResource};
 
 // ---------------------------------------------------------------------------
 // # SqliteDataLayer
@@ -188,6 +188,16 @@ where
     A: ReadAction<Output = R> + SqlPerformRead + 'static,
 {
     async fn read(&self, args: &A::Arguments) -> Result<A::Response, ListError> {
+        A::execute(&self.pool, args).await
+    }
+}
+
+impl<R, A> PerformReadOne<A> for SqliteDataLayer
+where
+    R: Resource + SqlResource + 'static,
+    A: ReadAction<Output = R> + SqlPerformReadOne + 'static,
+{
+    async fn read_one(&self, args: &A::Arguments) -> Result<A::Response, ReadError> {
         A::execute(&self.pool, args).await
     }
 }
