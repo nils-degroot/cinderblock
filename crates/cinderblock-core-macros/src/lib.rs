@@ -819,6 +819,34 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     });
 
+    let before_create_override = input.before_create.map(|closure| {
+        let param = closure
+            .inputs
+            .first()
+            .expect("before_create closure must have exactly one parameter");
+        let body = &closure.body;
+        quote::quote! {
+            fn before_create(&mut self) {
+                let hook = |#param: &mut Self| #body;
+                hook(self);
+            }
+        }
+    });
+
+    let before_update_override = input.before_update.map(|closure| {
+        let param = closure
+            .inputs
+            .first()
+            .expect("before_update closure must have exactly one parameter");
+        let body = &closure.body;
+        quote::quote! {
+            fn before_update(&mut self) {
+                let hook = |#param: &mut Self| #body;
+                hook(self);
+            }
+        }
+    });
+
     quote::quote! {
         #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize, cinderblock_core::serde::Deserialize)]
         pub struct #ident {
@@ -839,6 +867,10 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             fn primary_key(&self) -> &Self::PrimaryKey {
                 #primary_key_value
             }
+
+            #before_create_override
+
+            #before_update_override
         }
 
         #(#actions)*

@@ -35,6 +35,12 @@ pub struct ResourceMacroInput {
     pub relations: Vec<RelationDecl>,
     pub actions: Vec<ResourceActionInput>,
     pub extensions: Vec<ExtensionDecl>,
+    /// Optional lifecycle hook that runs on every create action, after the
+    /// resource struct is built from input but before persistence.
+    pub before_create: Option<ExprClosure>,
+    /// Optional lifecycle hook that runs on every update action, after
+    /// `apply_update_input` but before persistence.
+    pub before_update: Option<ExprClosure>,
 }
 
 /// A single attribute declaration inside the `attributes { ... }` block.
@@ -868,6 +874,8 @@ impl Parse for ResourceMacroInput {
         let mut actions: Vec<ResourceActionInput> = vec![];
         let mut extensions = vec![];
         let mut relations = vec![];
+        let mut before_create: Option<ExprClosure> = None;
+        let mut before_update: Option<ExprClosure> = None;
 
         // # Optional trailing sections
         //
@@ -1011,6 +1019,32 @@ impl Parse for ResourceMacroInput {
                         }
                     }
                 }
+                "before_create" => {
+                    let _: Ident = input.parse()?;
+
+                    if before_create.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "`before_create` can only be declared once per resource.",
+                        ));
+                    }
+
+                    before_create = Some(input.parse()?);
+                    let _: Token![;] = input.parse()?;
+                }
+                "before_update" => {
+                    let _: Ident = input.parse()?;
+
+                    if before_update.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "`before_update` can only be declared once per resource.",
+                        ));
+                    }
+
+                    before_update = Some(input.parse()?);
+                    let _: Token![;] = input.parse()?;
+                }
                 // Unknown section keyword — stop parsing and leave the
                 // remaining tokens for the caller (e.g., `config = { ... }`
                 // used by `ExtensionMacroInput`).
@@ -1059,6 +1093,8 @@ impl Parse for ResourceMacroInput {
             relations,
             actions,
             extensions,
+            before_create,
+            before_update,
         })
     }
 }
@@ -2545,5 +2581,153 @@ mod tests {
         check!(attr.writable.value());
         check!(attr.primary_key.value());
         check!(attr.default.is_some());
+    }
+
+    #[test]
+    fn parse_before_create_hook() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_create |post| {
+                post.id = String::from("generated");
+            };
+        });
+
+        check!(input.before_create.is_some());
+        check!(input.before_update.is_none());
+    }
+
+    #[test]
+    fn parse_before_update_hook() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_update |post| {
+                post.id = String::from("updated");
+            };
+        });
+
+        check!(input.before_create.is_none());
+        check!(input.before_update.is_some());
+    }
+
+    #[test]
+    fn parse_both_hooks() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_create |post| {
+                post.id = String::from("created");
+            };
+
+            before_update |post| {
+                post.id = String::from("updated");
+            };
+        });
+
+        check!(input.before_create.is_some());
+        check!(input.before_update.is_some());
+    }
+
+    #[test]
+    fn hooks_work_alongside_actions() {
+        let input = parse_resource(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_create |post| {
+                post.id = String::from("created");
+            };
+
+            actions {
+                create publish;
+                update edit;
+            }
+
+            before_update |post| {
+                post.id = String::from("updated");
+            };
+        });
+
+        check!(input.before_create.is_some());
+        check!(input.before_update.is_some());
+        check!(input.actions.len() == 2);
+    }
+
+    #[test]
+    fn duplicate_before_create_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_create |post| {
+                post.id = String::from("first");
+            };
+
+            before_create |post| {
+                post.id = String::from("second");
+            };
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("before_create"));
+        check!(msg.contains("once"));
+    }
+
+    #[test]
+    fn duplicate_before_update_produces_error() {
+        let result = syn::parse2::<ResourceMacroInput>(quote! {
+            name = Post;
+
+            attributes {
+                id String;
+            }
+
+            before_update |post| {
+                post.id = String::from("first");
+            };
+
+            before_update |post| {
+                post.id = String::from("second");
+            };
+        });
+
+        assert!(let Err(err) = result);
+        let msg = err.to_string();
+        check!(msg.contains("before_update"));
+        check!(msg.contains("once"));
+    }
+
+    #[test]
+    fn no_hooks_declared_defaults_to_none() {
+        let input = parse_resource(quote! {
+            name = Simple;
+
+            attributes {
+                id u64;
+            }
+        });
+
+        check!(input.before_create.is_none());
+        check!(input.before_update.is_none());
     }
 }
