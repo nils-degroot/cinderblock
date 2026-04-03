@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/nils-degroot/cinderblock"
@@ -18,8 +18,8 @@ keywords = ["framework", "crud", "resource", "declarative", "code-generation"]
 categories = ["web-programming"]
 
 [workspace.dependencies]
-cinderblock-core = { version = "0.5.0", path = "crates/cinderblock-core" }
-cinderblock-core-macros = { version = "0.5.0", path = "crates/cinderblock-core-macros" }
-cinderblock-extension-api = { version = "0.5.0", path = "crates/cinderblock-extension-api" }
-cinderblock-json-api-macros = { version = "0.5.0", path = "crates/cinderblock-json-api-macros" }
-cinderblock-sqlx-macros = { version = "0.5.0", path = "crates/cinderblock-sqlx-macros" }
+cinderblock-core = { version = "0.6.0", path = "crates/cinderblock-core" }
+cinderblock-core-macros = { version = "0.6.0", path = "crates/cinderblock-core-macros" }
+cinderblock-extension-api = { version = "0.6.0", path = "crates/cinderblock-extension-api" }
+cinderblock-json-api-macros = { version = "0.6.0", path = "crates/cinderblock-json-api-macros" }
+cinderblock-sqlx-macros = { version = "0.6.0", path = "crates/cinderblock-sqlx-macros" }
