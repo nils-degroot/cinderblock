@@ -231,7 +231,7 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cinderblock-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.4.0",
  "cinderblock-core-macros",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-core-macros"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.4.0",
  "cinderblock-extension-api",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-extension-api"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.4.0",
  "convert_case",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-json-api"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.3.16",
  "axum",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-json-api-macros"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cinderblock-extension-api",
  "convert_case",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-sqlx"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.4.0",
  "cinderblock-core",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "cinderblock-sqlx-macros"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "assert2 0.4.0",
  "cinderblock-extension-api",
