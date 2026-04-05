@@ -1034,6 +1034,11 @@ resource! {
             load [author];
         };
 
+        read one_post_with_author {
+            get;
+            load [author];
+        };
+
         create add_post;
     }
 
@@ -1070,6 +1075,11 @@ resource! {
         read all_writers;
 
         read all_writers_with_articles {
+            load [articles];
+        };
+
+        read one_writer_with_articles {
+            get;
             load [articles];
         };
 
@@ -1485,6 +1495,145 @@ async fn has_many_with_multiple_writers() {
         .expect("Eve should be in results");
     check!(eve_result.articles.len() == 1);
     check!(eve_result.articles[0].headline == "Eve's Article");
+}
+
+// ---------------------------------------------------------------------------
+// # Get + Load Tests (SQLx)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_with_belongs_to_loads_related_resource() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let author = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "GetAlice".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    let post = cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Get Hello World".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let result = cinderblock_core::read_one::<Post, OnePostWithAuthor>(&ctx, &post.post_id)
+        .await
+        .expect("get post with author");
+
+    check!(result.base.post_id == post.post_id);
+    check!(result.base.title == "Get Hello World");
+    check!(result.author.author_id == author.author_id);
+    check!(result.author.name == "GetAlice");
+}
+
+#[tokio::test]
+async fn get_with_belongs_to_serializes_with_flattened_base() {
+    let (ctx, _dl) = setup_blog().await;
+
+    let author = cinderblock_core::create::<Author, AddAuthor>(
+        AddAuthorInput {
+            name: "SerBob".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create author");
+
+    let post = cinderblock_core::create::<Post, AddPost>(
+        AddPostInput {
+            title: "Get Serialization Test".into(),
+            author_id: author.author_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create post");
+
+    let result = cinderblock_core::read_one::<Post, OnePostWithAuthor>(&ctx, &post.post_id)
+        .await
+        .expect("get post with author");
+
+    let json = serde_json::to_value(&result).expect("serialize to JSON");
+    check!(json["title"] == "Get Serialization Test");
+    check!(json["author_id"] == author.author_id.to_string());
+    check!(json["author"]["name"] == "SerBob");
+}
+
+#[tokio::test]
+async fn get_with_has_many_loads_related_resources() {
+    let (ctx, _dl) = setup_magazine().await;
+
+    let writer = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "GetDiana".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let article1 = cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "GetDiana's First".into(),
+            writer_id: writer.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 1");
+
+    let article2 = cinderblock_core::create::<Article, AddArticle>(
+        AddArticleInput {
+            headline: "GetDiana's Second".into(),
+            writer_id: writer.writer_id,
+        },
+        &ctx,
+    )
+    .await
+    .expect("create article 2");
+
+    let result =
+        cinderblock_core::read_one::<Writer, OneWriterWithArticles>(&ctx, &writer.writer_id)
+            .await
+            .expect("get writer with articles");
+
+    check!(result.base.pen_name == "GetDiana");
+    check!(result.articles.len() == 2);
+
+    let article_ids: std::collections::HashSet<_> =
+        result.articles.iter().map(|a| a.article_id).collect();
+    check!(article_ids.contains(&article1.article_id));
+    check!(article_ids.contains(&article2.article_id));
+}
+
+#[tokio::test]
+async fn get_with_has_many_no_related_returns_empty_vec() {
+    let (ctx, _dl) = setup_magazine().await;
+
+    let writer = cinderblock_core::create::<Writer, AddWriter>(
+        AddWriterInput {
+            pen_name: "GetLoner".into(),
+        },
+        &ctx,
+    )
+    .await
+    .expect("create writer");
+
+    let result =
+        cinderblock_core::read_one::<Writer, OneWriterWithArticles>(&ctx, &writer.writer_id)
+            .await
+            .expect("get writer with articles");
+
+    check!(result.base.writer_id == writer.writer_id);
+    check!(result.articles.is_empty());
 }
 
 // ---------------------------------------------------------------------------

@@ -129,7 +129,8 @@ pub struct ActionRead {
     /// instead of returning a list.
     ///
     /// Parsed from `get;` inside a read action body. Mutually exclusive with
-    /// `paged`, `filter`, `order`, `argument`, and `load`.
+    /// `paged`, `filter`, `order`, and `argument`. Can be combined with `load`
+    /// to eagerly load relations on a single-resource fetch.
     pub get: bool,
 }
 
@@ -636,7 +637,6 @@ impl Parse for ResourceActionInput {
                         reject_with_get!(!action.filters.is_empty(), "filter");
                         reject_with_get!(!action.orders.is_empty(), "order");
                         reject_with_get!(!action.arguments.is_empty(), "argument");
-                        reject_with_get!(!action.load.is_empty(), "load");
                     }
 
                     if input.peek(Token![;]) {
@@ -2319,6 +2319,38 @@ mod tests {
         assert!(let ResourceActionInputKind::Read(read_with_author) = &input.actions[1].kind);
         check!(read_with_author.load.len() == 1);
         check!(read_with_author.load[0] == "author");
+    }
+
+    #[test]
+    fn read_action_get_with_load() {
+        let input = parse_resource(quote! {
+            name = Comment;
+
+            attributes {
+                id String;
+                author_id String;
+            }
+
+            relations {
+                belongs_to author {
+                    ty User;
+                    source_attribute author_id;
+                };
+            }
+
+            actions {
+                read one_with_author {
+                    get;
+                    load [author];
+                };
+            }
+        });
+
+        check!(input.actions.len() == 1);
+        assert!(let ResourceActionInputKind::Read(read) = &input.actions[0].kind);
+        check!(read.get);
+        check!(read.load.len() == 1);
+        check!(read.load[0] == "author");
     }
 
     // -----------------------------------------------------------------------
