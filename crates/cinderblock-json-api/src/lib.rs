@@ -371,6 +371,12 @@ pub struct Response<T: serde::Serialize> {
     pub data: T,
 }
 
+impl<T: serde::Serialize> From<T> for Response<T> {
+    fn from(value: T) -> Self {
+        Self { data: value }
+    }
+}
+
 /// JSON API response envelope for paginated list endpoints.
 ///
 /// Returns `{ "data": [...], "meta": { page, per_page, total, total_pages } }`.
@@ -381,6 +387,15 @@ pub struct PaginatedResponse<T: serde::Serialize> {
     pub meta: PaginationMeta,
 }
 
+impl<T: serde::Serialize> From<cinderblock_core::PaginatedResult<T>> for PaginatedResponse<T> {
+    fn from(value: cinderblock_core::PaginatedResult<T>) -> Self {
+        Self {
+            data: value.data,
+            meta: value.meta.into(),
+        }
+    }
+}
+
 /// Pagination metadata included in [`PaginatedResponse`].
 #[derive(Debug, serde::Serialize)]
 pub struct PaginationMeta {
@@ -388,6 +403,17 @@ pub struct PaginationMeta {
     pub per_page: u32,
     pub total: u64,
     pub total_pages: u32,
+}
+
+impl From<cinderblock_core::PaginationMeta> for PaginationMeta {
+    fn from(value: cinderblock_core::PaginationMeta) -> Self {
+        Self {
+            page: value.page,
+            per_page: value.per_page,
+            total: value.total,
+            total_pages: value.total_pages,
+        }
+    }
 }
 
 // # PartialSchema / ToSchema for Response<T>
