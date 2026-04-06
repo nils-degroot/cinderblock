@@ -392,11 +392,14 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         .iter()
         .map(|route| {
             let action_name_str = route.action.to_string();
-            let full_path = format!("{}{}", base_path, route.path.value());
+            let full_path = format!("{base_path}{}", route.path.value());
             let method_str = route.method.as_str();
 
             let action_type_name = convert_case::ccase!(pascal, &action_name_str);
             let action_type = Ident::new(&action_type_name, route.action.span());
+
+            let args_type =
+                Ident::new(&format!("{action_type_name}Arguments"), route.action.span());
 
             // Look up the action definition — already validated above.
             let action_def = resource
@@ -404,6 +407,23 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 .iter()
                 .find(|a| a.raw_name == route.action)
                 .expect("action existence validated above");
+
+            let pre_flight_trace = quote::quote! {
+                cinderblock_json_api::tracing::info!(
+                    resource = stringify!(#ident),
+                    action = #action_name_str,
+                    "handling read request"
+                );
+            };
+
+            let error_trace = quote::quote! {
+                cinderblock_json_api::tracing::error!(
+                    resource = stringify!(#ident),
+                    action = #action_name_str,
+                    error = %err,
+                    "get request failed"
+                );
+            };
 
             let handler_and_method = match &action_def.kind {
                 ResourceActionInputKind::Read(action_read) => {
@@ -421,12 +441,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             | {
                                 let ctx = ctx.clone();
                                 async move {
-                                    cinderblock_json_api::tracing::info!(
-                                        resource = stringify!(#ident),
-                                        action = #action_name_str,
-                                        %primary_key,
-                                        "handling get request"
-                                    );
+                                    #pre_flight_trace
 
                                     match cinderblock_core::read_one::<#ident, #action_type>(&ctx, &primary_key).await {
                                         Ok(result) => (
@@ -437,12 +452,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         )
                                             .into_response(),
                                         Err(err) => {
-                                            cinderblock_json_api::tracing::error!(
-                                                resource = stringify!(#ident),
-                                                action = #action_name_str,
-                                                error = %err,
-                                                "get request failed"
-                                            );
+                                            #error_trace
                                             let status = match err.data() {
                                                 cinderblock_core::ReadError::NotFound { .. } =>
                                                     cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
@@ -456,21 +466,13 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             }
                         }
                     } else if is_paged {
-                        // Paged reads always have an Arguments struct
-                        // (with at least page/per_page fields).
-                        let args_type =
-                            Ident::new(&format!("{action_type_name}Arguments"), route.action.span());
                         quote::quote! {
                             move |
                                 cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
                             | {
                                 let ctx = ctx.clone();
                                 async move {
-                                    cinderblock_json_api::tracing::info!(
-                                        resource = stringify!(#ident),
-                                        action = #action_name_str,
-                                        "handling paged read request"
-                                    );
+                                    #pre_flight_trace
 
                                     match cinderblock_core::read::<#ident, #action_type>(&ctx, &args).await {
                                         Ok(result) => (
@@ -489,12 +491,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         )
                                             .into_response(),
                                         Err(err) => {
-                                            cinderblock_json_api::tracing::error!(
-                                                resource = stringify!(#ident),
-                                                action = #action_name_str,
-                                                error = %err,
-                                                "paged read request failed"
-                                            );
+                                            #error_trace
                                             let status = match err.data() {
                                                 cinderblock_core::ListError::DataLayer(_) =>
                                                     cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -506,19 +503,13 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             }
                         }
                     } else if needs_arguments_struct {
-                        let args_type =
-                            Ident::new(&format!("{action_type_name}Arguments"), route.action.span());
                         quote::quote! {
                             move |
                                 cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
                             | {
                                 let ctx = ctx.clone();
                                 async move {
-                                    cinderblock_json_api::tracing::info!(
-                                        resource = stringify!(#ident),
-                                        action = #action_name_str,
-                                        "handling read request"
-                                    );
+                                    #pre_flight_trace
 
                                     match cinderblock_core::read::<#ident, #action_type>(&ctx, &args).await {
                                         Ok(results) => (
@@ -529,12 +520,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         )
                                             .into_response(),
                                         Err(err) => {
-                                            cinderblock_json_api::tracing::error!(
-                                                resource = stringify!(#ident),
-                                                action = #action_name_str,
-                                                error = %err,
-                                                "read request failed"
-                                            );
+                                            #error_trace
                                             let status = match err.data() {
                                                 cinderblock_core::ListError::DataLayer(_) =>
                                                     cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -550,11 +536,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             move || {
                                 let ctx = ctx.clone();
                                 async move {
-                                    cinderblock_json_api::tracing::info!(
-                                        resource = stringify!(#ident),
-                                        action = #action_name_str,
-                                        "handling read request"
-                                    );
+                                    #pre_flight_trace
 
                                     match cinderblock_core::read::<#ident, #action_type>(&ctx, &()).await {
                                         Ok(results) => (
@@ -565,12 +547,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         )
                                             .into_response(),
                                         Err(err) => {
-                                            cinderblock_json_api::tracing::error!(
-                                                resource = stringify!(#ident),
-                                                action = #action_name_str,
-                                                error = %err,
-                                                "read request failed"
-                                            );
+                                            #error_trace
                                             let status = match err.data() {
                                                 cinderblock_core::ListError::DataLayer(_) =>
                                                     cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
