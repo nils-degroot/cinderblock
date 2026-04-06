@@ -1,9 +1,9 @@
 use cinderblock_extension_api::{
-    ActionRead, OrderDirection, ReadFilterValue, RelationDecl, RelationKind,
+    ActionRead, OrderDirection, ReadFilterValue, RelationDecl, RelationKind, util::is_optional,
 };
 use syn::Ident;
 
-use crate::{action::ActionGenerateContext, is_option_type};
+use crate::action::ActionGenerateContext;
 
 pub(crate) fn generate_read(
     ctx: &ActionGenerateContext,
@@ -377,7 +377,7 @@ pub(crate) fn generate_read(
                             .find(|a| a.name == *arg_name)
                             .expect("arg reference validated during parsing");
 
-                        if is_option_type(&arg_decl.ty) {
+                        if is_optional(&arg_decl.ty) {
                             quote::quote! {
                                 args.#arg_name.as_ref().map_or(true, |v| row.#field #op *v) &&
                             }
