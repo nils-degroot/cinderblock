@@ -856,7 +856,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 let input_type_str = format!("{action_type_name}Input");
 
                 let accept = match &action.kind {
-                    ResourceActionInputKind::Create { accept } => accept,
+                    ResourceActionInputKind::Create(create) => &create.accept,
                     ResourceActionInputKind::Update(update) => &update.accept,
                     _ => return None,
                 };
@@ -1181,11 +1181,11 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     }
                     }
-                    ResourceActionInputKind::Create { accept } => {
+                    ResourceActionInputKind::Create(create) => {
                         let action_type_name = convert_case::ccase!(pascal, &action_name_str);
                         let input_type =
                             Ident::new(&format!("{action_type_name}Input"), route.action.span());
-                        let fields = input_fields_for_accept(&resource.attributes, accept);
+                        let fields = input_fields_for_accept(&resource.attributes, &create.accept);
                         let body_required = !fields.is_empty();
 
                         quote::quote! {
