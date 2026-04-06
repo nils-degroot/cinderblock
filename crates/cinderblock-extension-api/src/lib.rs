@@ -14,6 +14,8 @@
 //      `ExtensionMacroInput<C>`, where `C: Parse` is the extension's own
 //      config type
 
+use std::ops::Deref;
+
 use syn::{
     ExprClosure, Ident, LitBool, Path, Token, Type, braced, bracketed, parenthesized, parse::Parse,
     punctuated::Punctuated,
@@ -31,7 +33,7 @@ pub mod util;
 /// optional data layer path, and an optional extensions block.
 #[derive(Debug, Clone)]
 pub struct ResourceMacroInput {
-    pub name: Vec<Ident>,
+    pub name: ResourceName,
     pub data_layer: Option<Path>,
     pub attributes: Vec<ResourceAttributeInput>,
     pub relations: Vec<RelationDecl>,
@@ -43,6 +45,40 @@ pub struct ResourceMacroInput {
     /// Optional lifecycle hook that runs on every update action, after
     /// `apply_update_input` but before persistence.
     pub before_update: Option<ExprClosure>,
+}
+
+impl ResourceMacroInput {
+    pub fn primary_keys(&self) -> impl Iterator<Item = &ResourceAttributeInput> {
+        self.attributes
+            .iter()
+            .filter(|attr| attr.primary_key.value())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceName {
+    segments: Vec<Ident>,
+}
+
+impl ResourceName {
+    pub fn str_segments(&self) -> Vec<String> {
+        self.segments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    }
+
+    pub fn as_literal(&self) -> String {
+        self.str_segments().join(".")
+    }
+}
+
+impl Deref for ResourceName {
+    type Target = Vec<Ident>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.segments
+    }
 }
 
 /// A single attribute declaration inside the `attributes { ... }` block.
@@ -1098,7 +1134,7 @@ impl Parse for ResourceMacroInput {
         }
 
         Ok(ResourceMacroInput {
-            name,
+            name: ResourceName { segments: name },
             data_layer,
             attributes,
             relations,
