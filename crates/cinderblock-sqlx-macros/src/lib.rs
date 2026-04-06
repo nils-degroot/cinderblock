@@ -260,10 +260,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             _ => None,
         })
         .map(|(action, action_read)| {
-            // TODO: This should come from the parsing crate
-            let action_name = convert_case::ccase!(pascal, action.name.to_string());
-            let action_name = Ident::new(&action_name, action.name.span());
-
+            let action_name = action.action_name.clone();
             let has_loads = !action_read.load.is_empty();
 
             // Get-actions without load delegate to `execute_sql_read_one` —
@@ -296,7 +293,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     .collect();
 
                 let wrapper_name =
-                    Ident::new(&format!("{action_name}Response"), action.name.span());
+                    Ident::new(&format!("{action_name}Response"), action.raw_name.span());
 
                 let relation_loads = loaded_relations.iter().map(|rel| {
                     let rel_ty = &rel.ty;
@@ -581,7 +578,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     .collect();
 
                 let wrapper_name =
-                    Ident::new(&format!("{action_name}Response"), action.name.span());
+                    Ident::new(&format!("{action_name}Response"), action.raw_name.span());
 
                 // # Relation loading queries
                 //
