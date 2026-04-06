@@ -29,52 +29,10 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
         .iter()
         .map(ResourceAttributeInput::to_field_definition);
 
-    let primary_key_type = {
-        let fields = input
-            .attributes
-            .iter()
-            .filter(|attr| attr.primary_key.value())
-            .collect::<Vec<_>>();
-
-        match fields.len() {
-            0 => todo!("Support no primary keys"),
-            1 => {
-                let ty = fields[0].ty.clone();
-                quote::quote! { #ty }
-            }
-            _ => todo!("Support multiple primary keys"),
-        }
-    };
-
-    let primary_key_generated = {
-        let fields = input
-            .attributes
-            .iter()
-            .filter(|attr| attr.primary_key.value())
-            .collect::<Vec<_>>();
-
-        match fields.len() {
-            0 => todo!("Support no primary keys"),
-            1 => fields[0].generated.value(),
-            _ => todo!("Support multiple primary keys"),
-        }
-    };
-
-    let primary_key_value = {
-        let fields = input
-            .attributes
-            .iter()
-            .filter(|attr| attr.primary_key.value())
-            .collect::<Vec<_>>();
-
-        match fields.len() {
-            0 => todo!("Support no primary keys"),
-            1 => {
-                let ty = fields[0].name.clone();
-                quote::quote! { &self.#ty }
-            }
-            _ => todo!("Support multiple primary keys"),
-        }
+    let primary_key = match input.primary_keys().collect::<Vec<_>>().as_slice() {
+        [] => todo!("Support no primary keys"),
+        [pk] => *pk,
+        [_, ..] => todo!("Support multiple primary keys"),
     };
 
     let actions = input.actions.iter().map(|action| {
@@ -94,13 +52,6 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             ResourceActionInputKind::Destroy => generate_destroy(&action_ctx),
         }
     });
-
-    let name_segments: Vec<String> = input
-        .name
-        .iter()
-        .map(|segment| segment.to_string())
-        .collect();
-    let resource_name_literal = name_segments.join(".");
 
     // # Data layer selection
     //
@@ -160,6 +111,16 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
             }
         }
     });
+
+    let primary_key_type = primary_key.ty.clone();
+    let primary_key_generated = primary_key.generated.clone();
+    let primary_key_value = {
+        let name = primary_key.name.clone();
+        quote::quote! { &self.#name }
+    };
+
+    let name_segments = input.name.str_segments();
+    let resource_name_literal = input.name.as_literal();
 
     quote::quote! {
         #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize, cinderblock_core::serde::Deserialize)]
