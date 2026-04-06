@@ -37,7 +37,7 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{
-    Accept, ExtensionMacroInput, ResourceActionInputKind, util::is_optional,
+    Accept, ExtensionMacroInput, ResourceActionInput, ResourceActionInputKind, util::is_optional,
 };
 use syn::{Ident, LitBool, LitStr, Token, Type, braced, parse::Parse};
 
@@ -116,9 +116,17 @@ impl Parse for HttpMethod {
     }
 }
 
+#[derive(Debug, Clone)]
+struct EnrichedRouteDecl {
+    route: RouteDecl,
+    action: ResourceActionInput,
+    input_type: Ident,
+}
+
 /// A single route declaration mapping an HTTP method + path to a resource action.
 ///
 /// Parsed from `route = { method = GET; path = "/"; action = all; };`.
+#[derive(Debug, Clone)]
 struct RouteDecl {
     method: HttpMethod,
     /// URL path relative to `base_path` (e.g., "/" or "/{primary_key}/close").
@@ -381,28 +389,45 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         }
     }
 
+    let enriched_routes = config
+        .routes
+        .iter()
+        .map(|route| {
+            let action = input
+                .resource
+                .actions
+                .iter()
+                .find(|action| action.raw_name == route.action)
+                .expect("Coult not find action")
+                .clone();
+
+            let input_type =
+                Ident::new(&format!("{}Input", action.action_name), route.action.span());
+
+            EnrichedRouteDecl {
+                route: route.clone(),
+                action,
+                input_type,
+            }
+        })
+        .collect::<Vec<_>>();
+
     // # Route generation
     //
     // For each declared route, we look up the action in the resource
     // definition to determine its kind (read/create/update/destroy), then
     // generate the appropriate handler with the right extractors and
     // response types.
-    let route_registrations: Vec<_> = config
-        .routes
+    let route_registrations = enriched_routes
         .iter()
         .map(|route| {
-            let action = input.resource.actions
-                .iter()
-                .find(|action| action.raw_name == route.action)
-                .expect("Failed to find action");
+            let action_name_str = route.action.raw_name.to_string();
 
-            let action_name_str = route.action.to_string();
+            let full_path = format!("{base_path}{}", route.route.path.value());
+            let method_str = route.route.method.as_str();
 
-            let full_path = format!("{base_path}{}", route.path.value());
-            let method_str = route.method.as_str();
-
-            let action_type = action.action_name.clone();
-            let args_type = Ident::new(&format!("{action_type}Arguments"), route.action.span());
+            let action_type = route.action.action_name.clone();
+            let args_type = Ident::new(&format!("{action_type}Arguments"), route.route.action.span());
 
             let pre_flight_trace = quote::quote! {
                 cinderblock_json_api::tracing::info!(
@@ -421,9 +446,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 );
             };
 
-            let input_type = Ident::new(&format!("{action_type}Input"), route.action.span());
+            let input_type = route.input_type.clone();
 
-            let handler_and_method = match &action.kind {
+            let handler_and_method = match &route.action.kind {
                 ResourceActionInputKind::Read(action_read) => {
                     let handler = if action_read.get {
                         quote::quote! {
@@ -498,7 +523,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     };
 
-                    let routing_fn = route.method.axum_routing_fn();
+                    let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
                 ResourceActionInputKind::Create { .. } => {
@@ -538,7 +563,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     };
 
-                    let routing_fn = route.method.axum_routing_fn();
+                    let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
                 ResourceActionInputKind::Update(_) => {
@@ -592,7 +617,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     };
 
-                    let routing_fn = route.method.axum_routing_fn();
+                    let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
                 ResourceActionInputKind::Destroy => {
@@ -639,7 +664,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     };
 
-                    let routing_fn = route.method.axum_routing_fn();
+                    let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
             };
@@ -661,7 +686,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 }
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     // # OpenAPI generation
     //
@@ -844,16 +869,15 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 // Only create/update actions have input structs.
                 match &action.kind {
                     ResourceActionInputKind::Create { .. } | ResourceActionInputKind::Update(_) => {
+                        Some(quote::quote! {
+                            .schema(
+                                #input_type_str,
+                                <#input_type as cinderblock_json_api::utoipa::PartialSchema>::schema(),
+                            )
+                        })
                     }
-                    _ => return None,
+                    _ => None,
                 }
-
-                Some(quote::quote! {
-                    .schema(
-                        #input_type_str,
-                        <#input_type as cinderblock_json_api::utoipa::PartialSchema>::schema(),
-                    )
-                })
             })
             .collect();
 
@@ -864,33 +888,21 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
         // returns single, destroy returns 204).
         let ident_kebab = convert_case::ccase!(kebab, ident.to_string());
 
-        let path_items: Vec<_> = config
-            .routes
+        let path_items: Vec<_> = enriched_routes
             .iter()
             .map(|route| {
-                let action_name_str = route.action.to_string();
-                let full_path = format!("{}{}", base_path, route.path.value());
+                let action_name_str = route.route.action.to_string();
+                let full_path = format!("{}{}", base_path, route.route.path.value());
                 let action_path_kebab = convert_case::ccase!(kebab, &action_name_str);
-                let http_method = route.method.openapi_http_method();
-                let method_lower = route.method.as_str().to_lowercase();
+                let http_method = route.route.method.openapi_http_method();
+                let method_lower = route.route.method.as_str().to_lowercase();
                 let operation_id = format!("{}-{}-{}", method_lower, ident_kebab, action_path_kebab);
 
-                let action_def = resource
-                    .actions
-                    .iter()
-                    .find(|a| a.raw_name == route.action)
-                    .expect("action existence validated above");
-
-                // Find the primary key type for path parameter schemas.
-                let pk_type = resource
-                    .attributes
-                    .iter()
-                    .find(|a| a.primary_key.value())
-                    .map(|a| &a.ty);
+                let pk_type = resource.primary_keys().next().map(|pk| pk.ty.clone());
 
                 // Generate a path parameter for {primary_key} if the route
                 // path contains it.
-                let pk_parameter = if route.path.value().contains("{primary_key}") {
+                let pk_parameter = if route.route.path.value().contains("{primary_key}") {
                     pk_type.map(|ty| {
                         quote::quote! {
                             .parameter(
@@ -907,11 +919,9 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     None
                 };
 
-                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
-                let input_type =
-                    Ident::new(&format!("{action_type_name}Input"), route.action.span());
+                let input_type = route.input_type.clone();
 
-                match &action_def.kind {
+                match &route.action.kind {
                     ResourceActionInputKind::Read(action_read) => {
                         let is_get = action_read.get;
                         let is_paged = action_read.paged.is_some();
