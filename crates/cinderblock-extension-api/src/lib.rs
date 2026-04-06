@@ -19,7 +19,10 @@ use syn::{
     punctuated::Punctuated,
 };
 
-use crate::domain::resource_name::ResourceName;
+use crate::{
+    domain::resource_name::ResourceName,
+    util::{drop_trailing_semi, parse_if},
+};
 
 pub mod domain;
 pub mod util;
@@ -119,11 +122,10 @@ pub enum ResourceActionInputKind {
     Read(ActionRead),
     Create(ActionCreate),
     Update(ActionUpdate),
-    /// Destroy takes no input — the primary key is provided via the URL path.
     Destroy,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ActionRead {
     pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
@@ -235,7 +237,7 @@ impl Parse for ReadArgument {
 
 /// Body of an `update` action: which fields to accept and what change
 /// closures to run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct ActionUpdate {
     pub accept: Accept,
     pub changes: Vec<UpdateChange>,
@@ -430,28 +432,13 @@ impl Parse for ResourceActionInput {
 
         let kind = match kind.to_string().as_str() {
             "read" => {
-                if input.peek(Token![;]) {
-                    let _: Token![;] = input.parse()?;
-                    ResourceActionInputKind::Read(ActionRead {
-                        arguments: vec![],
-                        filters: vec![],
-                        orders: vec![],
-                        paged: None,
-                        load: vec![],
-                        get: false,
-                    })
+                if parse_if::<Token![;]>(input, |_| true).is_some() {
+                    ResourceActionInputKind::Read(ActionRead::default())
                 } else {
                     let content;
                     braced!(content in input);
 
-                    let mut action = ActionRead {
-                        arguments: vec![],
-                        filters: vec![],
-                        orders: vec![],
-                        paged: None,
-                        load: vec![],
-                        get: false,
-                    };
+                    let mut action = ActionRead::default();
 
                     while !content.is_empty() {
                         let key: Ident = content.parse()?;
@@ -656,16 +643,12 @@ impl Parse for ResourceActionInput {
                         reject_with_get!(!action.arguments.is_empty(), "argument");
                     }
 
-                    if input.peek(Token![;]) {
-                        let _: Token![;] = input.parse()?;
-                    }
-
+                    drop_trailing_semi(input);
                     ResourceActionInputKind::Read(action)
                 }
             }
             "create" => {
-                if input.peek(Token![;]) {
-                    let _: Token![;] = input.parse()?;
+                if parse_if::<Token![;]>(input, |_| true).is_some() {
                     ResourceActionInputKind::Create(ActionCreate::default())
                 } else {
                     let content;
@@ -699,39 +682,22 @@ impl Parse for ResourceActionInput {
                         }
                     }
 
-                    // Consume optional trailing semicolon after the closing brace,
-                    // allowing both `create open { ... }` and `create open { ... };`.
-                    if input.peek(Token![;]) {
-                        let _: Token![;] = input.parse()?;
-                    }
-
+                    drop_trailing_semi(input);
                     ResourceActionInputKind::Create(ActionCreate { accept })
                 }
             }
             "destroy" => {
-                // Destroy actions are simple — just `destroy action_name;`
-                // with no body. The primary key comes from the URL path at
-                // the HTTP layer.
                 let _: Token![;] = input.parse()?;
-
                 ResourceActionInputKind::Destroy
             }
             "update" => {
-                if input.peek(Token![;]) {
-                    let _: Token![;] = input.parse()?;
-
-                    ResourceActionInputKind::Update(ActionUpdate {
-                        accept: Accept::Default,
-                        changes: vec![],
-                    })
+                if parse_if::<Token![;]>(input, |_| true).is_some() {
+                    ResourceActionInputKind::Update(ActionUpdate::default())
                 } else {
                     let content;
                     braced!(content in input);
 
-                    let mut action = ActionUpdate {
-                        accept: Accept::Default,
-                        changes: vec![],
-                    };
+                    let mut action = ActionUpdate::default();
 
                     while !content.is_empty() {
                         let key: Ident = content.parse()?;
@@ -764,12 +730,7 @@ impl Parse for ResourceActionInput {
                         }
                     }
 
-                    // Consume optional trailing semicolon after the closing brace,
-                    // allowing both `update close { ... }` and `update close { ... };`.
-                    if input.peek(Token![;]) {
-                        let _: Token![;] = input.parse()?;
-                    }
-
+                    drop_trailing_semi(input);
                     ResourceActionInputKind::Update(action)
                 }
             }
@@ -794,37 +755,27 @@ impl Parse for ResourceActionInput {
 
 impl Parse for ResourceMacroInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        // # Name segment
-        //
-        // Parses `name = Helpdesk.Support.Ticket;` — a dotted identifier list.
-        let _: Ident = input.parse()?; // `name`
-        let _: Token![=] = input.parse()?;
+        // Parse the name of the resource
+        let name = {
+            parse_if::<Ident>(input, |ident| ident == "name").ok_or(syn::Error::new(
+                input.span(),
+                "Expected `name` ident as first entry",
+            ))?;
+            let _: Token![=] = input.parse()?;
+            let name = ResourceName::parse(input)?;
+            let _: Token![;] = input.parse()?;
+            name
+        };
 
-        let name = ResourceName::parse(input)?;
-
-        let _: Token![;] = input.parse()?;
-
-        // # Data layer (optional)
-        //
-        // Parses `data_layer = some::path::SqliteDataLayer;` if present.
-        // When omitted, the `resource!` macro defaults to `InMemoryDataLayer`.
-        let data_layer = {
-            let fork = input.fork();
-            if let Ok(ident) = fork.parse::<Ident>() {
-                if ident == "data_layer" {
-                    // Consume from the real stream now that we've confirmed
-                    // the keyword.
-                    let _: Ident = input.parse()?;
-                    let _: Token![=] = input.parse()?;
-                    let path: Path = input.parse()?;
-                    let _: Token![;] = input.parse()?;
-                    Some(path)
-                } else {
-                    None
-                }
-            } else {
-                None
+        // Parse the data layer and default to `InMemoryDataLayer` if its missing
+        let data_layer = match parse_if::<Ident>(input, |ident| ident == "data_layer") {
+            Some(_) => {
+                let _: Token![=] = input.parse()?;
+                let path: Path = input.parse()?;
+                let _: Token![;] = input.parse()?;
+                Some(path)
             }
+            None => None,
         };
 
         // # Attributes block
@@ -840,33 +791,23 @@ impl Parse for ResourceMacroInput {
         while !content.is_empty() {
             let name: Ident = content.parse()?;
 
-            // uuid_primary_key shortcut: expands to Uuid type with
-            // primary_key=true, writable=false, default=|| uuid::Uuid::new_v4()
-            let mut base = if content.peek(Ident)
-                && content
-                    .fork()
-                    .parse::<Ident>()
-                    .is_ok_and(|id| id == "uuid_primary_key")
-            {
-                let _: Ident = content.parse()?;
-
-                ResourceAttributeInput {
+            let mut base = match parse_if::<Ident>(&content, |ident| ident == "uuid_primary_key") {
+                Some(_) => ResourceAttributeInput {
                     ty: syn::parse_quote!(uuid::Uuid),
                     primary_key: LitBool::new(true, name.span()),
                     generated: LitBool::new(false, name.span()),
                     writable: LitBool::new(false, name.span()),
                     default: Some(syn::parse_quote!(|| uuid::Uuid::new_v4())),
                     name,
-                }
-            } else {
-                ResourceAttributeInput {
+                },
+                None => ResourceAttributeInput {
                     ty: content.parse()?,
                     primary_key: LitBool::new(false, name.span()),
                     generated: LitBool::new(false, name.span()),
                     writable: LitBool::new(true, name.span()),
                     default: None,
                     name,
-                }
+                },
             };
 
             if content.peek(Token![;]) {
@@ -881,9 +822,7 @@ impl Parse for ResourceMacroInput {
 
             attributes.push(base);
 
-            if content.peek(Token![;]) {
-                let _: Token![;] = content.parse()?;
-            }
+            drop_trailing_semi(&content);
         }
 
         // # Actions block (optional)
@@ -996,10 +935,7 @@ impl Parse for ResourceMacroInput {
                             destination_attribute,
                         });
 
-                        // Optional trailing semicolon after the relation block
-                        if content.peek(Token![;]) {
-                            let _: Token![;] = content.parse()?;
-                        }
+                        parse_if::<Token![;]>(&content, |_| true);
                     }
                 }
                 "actions" => {
@@ -1031,10 +967,7 @@ impl Parse for ResourceMacroInput {
                             config_tokens,
                         });
 
-                        // Optional trailing semicolon after the extension block
-                        if content.peek(Token![;]) {
-                            let _: Token![;] = content.parse()?;
-                        }
+                        drop_trailing_semi(&content);
                     }
                 }
                 "before_create" => {
@@ -1125,11 +1058,11 @@ impl<C: Parse> Parse for ExtensionMacroInput<C> {
         let resource: ResourceMacroInput = resource_content.parse()?;
 
         // Parse the `config = { ... }` block appended by `resource!`.
-        let config_keyword: Ident = input.parse()?;
-        if config_keyword != "config" {
+        let keyword: Ident = input.parse()?;
+        if keyword != "config" {
             return Err(syn::Error::new(
-                config_keyword.span(),
-                format!("expected `config`, got `{config_keyword}`"),
+                keyword.span(),
+                format!("expected `config`, got `{keyword}`"),
             ));
         }
         let _: Token![=] = input.parse()?;
