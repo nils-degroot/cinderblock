@@ -27,7 +27,7 @@ use syn::{
 ///
 /// Represents the full DSL including name, attributes, actions, an
 /// optional data layer path, and an optional extensions block.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceMacroInput {
     pub name: Vec<Ident>,
     pub data_layer: Option<Path>,
@@ -47,7 +47,7 @@ pub struct ResourceMacroInput {
 ///
 /// Supports an optional options sub-block for `primary_key`, `generated`,
 /// `writable`, and `default` settings.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceAttributeInput {
     pub name: Ident,
     pub ty: Type,
@@ -94,7 +94,7 @@ impl ResourceAttributeInput {
 }
 
 /// A single action declaration (e.g., `create open;` or `update close { ... };`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResourceActionInput {
     pub kind: ResourceActionInputKind,
     pub raw_name: Ident,
@@ -102,18 +102,16 @@ pub struct ResourceActionInput {
 }
 
 /// The kind-specific payload of an action — create, update, or destroy.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ResourceActionInputKind {
     Read(ActionRead),
-    Create {
-        accept: Accept,
-    },
+    Create(ActionCreate),
     Update(ActionUpdate),
     /// Destroy takes no input — the primary key is provided via the URL path.
     Destroy,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ActionRead {
     pub arguments: Vec<ReadArgument>,
     pub filters: Vec<ReadFilter>,
@@ -139,7 +137,7 @@ pub struct ActionRead {
 ///
 /// Parsed from `paged;` (all defaults) or `paged { default_per_page 50; max_per_page 200; };`
 /// inside a read action body. When both fields are `None`, framework defaults apply.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PagedConfig {
     /// Default number of items per page when the client doesn't specify `per_page`.
     /// When `None`, the framework default (`cinderblock_core::DEFAULT_PER_PAGE`) is used.
@@ -155,13 +153,13 @@ pub struct PagedConfig {
 /// Optionality is determined by the Rust type itself: if the user writes
 /// `Option<String>`, it's optional; if they write `String`, it's required.
 /// No separate keyword is needed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReadArgument {
     pub name: Ident,
     pub ty: Type,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReadFilter {
     pub field: Ident,
     pub op: ReadFilterOperation,
@@ -171,13 +169,13 @@ pub struct ReadFilter {
 /// The right-hand side of a filter expression. Either a compile-time literal
 /// expression (e.g., `false`, `42`, `TicketStatus::Open`) or a reference to a
 /// runtime argument via `arg(name)`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ReadFilterValue {
     Literal(syn::Expr),
     Arg(Ident),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ReadFilterOperation {
     Eq,
 }
@@ -197,7 +195,7 @@ impl Parse for ReadFilterOperation {
 }
 
 /// The sort direction for an order clause.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum OrderDirection {
     Asc,
     Desc,
@@ -207,7 +205,7 @@ pub enum OrderDirection {
 ///
 /// DSL syntax: `order { field_name desc; field_name2; };`
 /// When the direction is omitted, `Asc` is used as the default.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OrderClause {
     pub field: Ident,
     pub direction: OrderDirection,
@@ -225,7 +223,7 @@ impl Parse for ReadArgument {
 
 /// Body of an `update` action: which fields to accept and what change
 /// closures to run.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ActionUpdate {
     pub accept: Accept,
     pub changes: Vec<UpdateChange>,
@@ -235,8 +233,9 @@ pub struct ActionUpdate {
 ///
 /// `Default` means all writable attributes; `Only(vec)` restricts to the
 /// listed fields.
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub enum Accept {
+    #[default]
     Default,
     Only(Vec<Ident>),
 }
@@ -275,7 +274,7 @@ pub enum RelationKind {
 ///
 /// `destination_attribute` is optional and defaults to the destination
 /// resource's primary key when omitted.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RelationDecl {
     pub name: Ident,
     pub kind: RelationKind,
@@ -288,8 +287,13 @@ pub struct RelationDecl {
     pub destination_attribute: Option<Ident>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ActionCreate {
+    pub accept: Accept,
+}
+
 /// A mutation closure attached to an update action.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum UpdateChange {
     // TODO: support `change` (by-value) variant once needed
     Change(ExprClosure),
@@ -313,7 +317,7 @@ pub enum UpdateChange {
 ///     };
 /// }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExtensionDecl {
     /// The module path of the extension (e.g., `cinderblock_json_api`).
     pub path: Path,
@@ -650,10 +654,7 @@ impl Parse for ResourceActionInput {
             "create" => {
                 if input.peek(Token![;]) {
                     let _: Token![;] = input.parse()?;
-
-                    ResourceActionInputKind::Create {
-                        accept: Accept::Default,
-                    }
+                    ResourceActionInputKind::Create(ActionCreate::default())
                 } else {
                     let content;
                     braced!(content in input);
@@ -692,7 +693,7 @@ impl Parse for ResourceActionInput {
                         let _: Token![;] = input.parse()?;
                     }
 
-                    ResourceActionInputKind::Create { accept }
+                    ResourceActionInputKind::Create(ActionCreate { accept })
                 }
             }
             "destroy" => {
@@ -1306,7 +1307,7 @@ mod tests {
 
         check!(input.actions.len() == 1);
         check!(input.actions[0].raw_name == "open");
-        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
+        check!(let ResourceActionInputKind::Create(_) = &input.actions[0].kind);
     }
 
     #[test]
@@ -1327,7 +1328,7 @@ mod tests {
 
         check!(input.actions.len() == 1);
         check!(input.actions[0].raw_name == "assign");
-        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[0].kind);
+        assert!(let ResourceActionInputKind::Create(ActionCreate{ accept: Accept::Only(idents) }) = &input.actions[0].kind);
         check!(idents.len() == 1);
         check!(idents[0] == "subject");
     }
@@ -1398,10 +1399,10 @@ mod tests {
         check!(input.actions.len() == 2);
 
         check!(input.actions[0].raw_name == "open");
-        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
+        assert!(let ResourceActionInputKind::Create(ActionCreate{ accept: Accept::Default }) = &input.actions[0].kind);
 
         check!(input.actions[1].raw_name == "assign");
-        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[1].kind);
+        assert!(let ResourceActionInputKind::Create(ActionCreate{ accept: Accept::Only(idents) }) = &input.actions[1].kind);
         check!(idents.len() == 1);
         check!(idents[0] == "subject");
     }
@@ -1413,7 +1414,7 @@ mod tests {
         }));
 
         check!(action.raw_name == "open");
-        check!(let ResourceActionInputKind::Create { accept: Accept::Default } = action.kind);
+        assert!(let ResourceActionInputKind::Create(ActionCreate{ accept: Accept::Default }) = &action.kind);
     }
 
     #[test]
@@ -1425,7 +1426,7 @@ mod tests {
         }));
 
         check!(action.raw_name == "bulk_insert");
-        assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = action.kind);
+        assert!(let ResourceActionInputKind::Create(ActionCreate{ accept: Accept::Only(idents) }) = &action.kind);
         let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
         check!(names == vec!["name", "email", "age"]);
     }
