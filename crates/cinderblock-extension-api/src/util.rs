@@ -5,7 +5,7 @@ use syn::Type;
 /// We inspect the outermost path segment for the identifier `Option`. This
 /// handles both `Option<T>` and `std::option::Option<T>` (by checking the
 /// last segment).
-pub(crate) fn is_option_type(ty: &Type) -> bool {
+pub fn is_optional(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         type_path
             .path

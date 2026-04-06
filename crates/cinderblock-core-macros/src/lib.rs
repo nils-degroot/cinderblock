@@ -4,16 +4,12 @@ use cinderblock_extension_api::{
     ResourceActionInputKind, ResourceAttributeInput, ResourceMacroInput,
 };
 
-use crate::{
-    action::{
-        ActionGenerateContext, create::generate_create, destroy::generate_destroy,
-        read::generate_read, update::generate_update,
-    },
-    util::is_option_type,
+use crate::action::{
+    ActionGenerateContext, create::generate_create, destroy::generate_destroy, read::generate_read,
+    update::generate_update,
 };
 
 mod action;
-mod util;
 
 #[cfg(test)]
 mod tests;

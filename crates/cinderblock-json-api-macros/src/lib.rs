@@ -36,7 +36,9 @@
 
 use std::collections::HashSet;
 
-use cinderblock_extension_api::{Accept, ExtensionMacroInput, ResourceActionInputKind};
+use cinderblock_extension_api::{
+    Accept, ExtensionMacroInput, ResourceActionInputKind, util::is_optional,
+};
 use syn::{Ident, LitBool, LitStr, Token, Type, braced, parse::Parse};
 
 /// Supported HTTP methods for route declarations.
@@ -276,19 +278,6 @@ fn input_fields_for_accept<'a>(
                 .map(|a| (&a.name, &a.ty))
                 .collect()
         }
-    }
-}
-
-/// Checks whether a `syn::Type` is `Option<T>`.
-fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "Option")
-    } else {
-        false
     }
 }
 
@@ -792,9 +781,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             .map(|attr| {
                 let field_name = attr.name.to_string();
                 let field_type = &attr.ty;
-                let is_optional = is_option_type(field_type);
 
-                let required_clause = if is_optional {
+                let required_clause = if is_optional(field_type) {
                     quote::quote! {}
                 } else {
                     quote::quote! { .required(#field_name) }
@@ -867,9 +855,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     .iter()
                     .map(|(name, ty)| {
                         let name_str = name.to_string();
-                        let is_optional = is_option_type(ty);
 
-                        let required_clause = if is_optional {
+                        let required_clause = if is_optional(ty) {
                             quote::quote! {}
                         } else {
                             quote::quote! { .required(#name_str) }
@@ -1010,6 +997,10 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     None
                 };
 
+                let action_type_name = convert_case::ccase!(pascal, &action_name_str);
+                let input_type =
+                    Ident::new(&format!("{action_type_name}Input"), route.action.span());
+
                 match &action_def.kind {
                     ResourceActionInputKind::Read(action_read) => {
                         let is_get = action_read.get;
@@ -1071,7 +1062,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         // serde actually deserializes from the query string.
                         let query_params: Vec<_> = action_read.arguments.iter().map(|arg| {
                             let arg_param_name = arg.name.to_string();
-                            let is_optional = is_option_type(&arg.ty);
+                            let is_optional = is_optional(&arg.ty);
 
                             let schema_type = if is_optional {
                                 extract_option_inner_type(&arg.ty).unwrap_or(&arg.ty)
@@ -1182,9 +1173,6 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     }
                     }
                     ResourceActionInputKind::Create(create) => {
-                        let action_type_name = convert_case::ccase!(pascal, &action_name_str);
-                        let input_type =
-                            Ident::new(&format!("{action_type_name}Input"), route.action.span());
                         let fields = input_fields_for_accept(&resource.attributes, &create.accept);
                         let body_required = !fields.is_empty();
 
@@ -1245,9 +1233,6 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     }
                     ResourceActionInputKind::Update(update) => {
-                        let action_type_name = convert_case::ccase!(pascal, &action_name_str);
-                        let input_type =
-                            Ident::new(&format!("{action_type_name}Input"), route.action.span());
                         let fields = input_fields_for_accept(&resource.attributes, &update.accept);
                         let body_required = !fields.is_empty();
 

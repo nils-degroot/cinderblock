@@ -72,21 +72,9 @@
 
 use cinderblock_extension_api::{
     ExtensionMacroInput, OrderDirection, ReadFilterValue, RelationDecl, RelationKind,
+    util::is_optional,
 };
-use syn::{Ident, LitStr, Type, parse::Parse};
-
-/// Checks whether a `syn::Type` is `Option<T>`.
-fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        type_path
-            .path
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "Option")
-    } else {
-        false
-    }
-}
+use syn::{Ident, LitStr, parse::Parse};
 
 // ---------------------------------------------------------------------------
 // # Config Parsing
@@ -507,7 +495,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                             .find(|a| a.name == *arg_name)
                             .expect("arg reference validated during parsing");
 
-                        if is_option_type(&arg_decl.ty) {
+                        if is_optional(&arg_decl.ty) {
                             // Optional: only push the clause when Some
                             quote::quote! {
                                 if let Some(ref val) = args.#arg_name {
