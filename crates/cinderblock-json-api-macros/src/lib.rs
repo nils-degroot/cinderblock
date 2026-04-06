@@ -366,7 +366,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
     for route in &config.routes {
         let action_name_str = route.action.to_string();
 
-        if !resource.actions.iter().any(|a| a.name == route.action) {
+        if !resource.actions.iter().any(|a| a.raw_name == route.action) {
             return syn::Error::new(
                 route.action.span(),
                 format!(
@@ -413,7 +413,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             let action_def = resource
                 .actions
                 .iter()
-                .find(|a| a.name == route.action)
+                .find(|a| a.raw_name == route.action)
                 .expect("action existence validated above");
 
             let handler_and_method = match &action_def.kind {
@@ -845,14 +845,14 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             .actions
             .iter()
             .filter_map(|action| {
-                let action_name_str = action.name.to_string();
+                let action_name_str = action.raw_name.to_string();
                 if !routed_action_names.contains(&action_name_str) {
                     return None;
                 }
 
                 let action_type_name = convert_case::ccase!(pascal, &action_name_str);
                 let input_type =
-                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                    Ident::new(&format!("{action_type_name}Input"), action.raw_name.span());
                 let input_type_str = format!("{action_type_name}Input");
 
                 let accept = match &action.kind {
@@ -934,14 +934,14 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             .actions
             .iter()
             .filter_map(|action| {
-                let action_name_str = action.name.to_string();
+                let action_name_str = action.raw_name.to_string();
                 if !routed_action_names.contains(&action_name_str) {
                     return None;
                 }
 
                 let action_type_name = convert_case::ccase!(pascal, &action_name_str);
                 let input_type =
-                    Ident::new(&format!("{action_type_name}Input"), action.name.span());
+                    Ident::new(&format!("{action_type_name}Input"), action.raw_name.span());
                 let input_type_str = format!("{action_type_name}Input");
 
                 // Only create/update actions have input structs.
@@ -981,7 +981,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 let action_def = resource
                     .actions
                     .iter()
-                    .find(|a| a.name == route.action)
+                    .find(|a| a.raw_name == route.action)
                     .expect("action existence validated above");
 
                 // Find the primary key type for path parameter schemas.

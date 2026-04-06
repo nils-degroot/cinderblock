@@ -97,7 +97,8 @@ impl ResourceAttributeInput {
 #[derive(Debug)]
 pub struct ResourceActionInput {
     pub kind: ResourceActionInputKind,
-    pub name: Ident,
+    pub raw_name: Ident,
+    pub action_name: Ident,
 }
 
 /// The kind-specific payload of an action — create, update, or destroy.
@@ -409,7 +410,7 @@ pub fn parse_attribute<V: Parse>(input: syn::parse::ParseStream) -> syn::Result<
 impl Parse for ResourceActionInput {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let kind: Ident = input.parse()?;
-        let name: Ident = input.parse()?;
+        let raw_name: Ident = input.parse()?;
 
         let kind = match kind.to_string().as_str() {
             "read" => {
@@ -622,7 +623,7 @@ impl Parse for ResourceActionInput {
                             ($cond:expr, $keyword:literal) => {
                                 if $cond {
                                     return Err(syn::Error::new(
-                                        name.span(),
+                                        raw_name.span(),
                                         concat!(
                                             "`get` is mutually exclusive with `",
                                             $keyword,
@@ -767,7 +768,14 @@ impl Parse for ResourceActionInput {
             }
         };
 
-        Ok(ResourceActionInput { kind, name })
+        let action_name = convert_case::ccase!(pascal, raw_name.to_string());
+        let action_name = Ident::new(&action_name, raw_name.span());
+
+        Ok(ResourceActionInput {
+            kind,
+            action_name,
+            raw_name,
+        })
     }
 }
 
@@ -1065,7 +1073,7 @@ impl Parse for ResourceMacroInput {
                             format!(
                                 "Read action `{}` loads undeclared relation `{load_name}`. \
                                  Declare it in the `relations {{ ... }}` block.",
-                                action.name,
+                                action.raw_name,
                             ),
                         ));
                     }
@@ -1078,7 +1086,7 @@ impl Parse for ResourceMacroInput {
                             format!(
                                 "Read action `{}` orders by undeclared attribute `{}`. \
                                  Declare it in the `attributes {{ ... }}` block.",
-                                action.name, order.field,
+                                action.raw_name, order.field,
                             ),
                         ));
                     }
@@ -1297,7 +1305,7 @@ mod tests {
         });
 
         check!(input.actions.len() == 1);
-        check!(input.actions[0].name == "open");
+        check!(input.actions[0].raw_name == "open");
         check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
     }
 
@@ -1318,7 +1326,7 @@ mod tests {
         });
 
         check!(input.actions.len() == 1);
-        check!(input.actions[0].name == "assign");
+        check!(input.actions[0].raw_name == "assign");
         assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[0].kind);
         check!(idents.len() == 1);
         check!(idents[0] == "subject");
@@ -1389,10 +1397,10 @@ mod tests {
 
         check!(input.actions.len() == 2);
 
-        check!(input.actions[0].name == "open");
+        check!(input.actions[0].raw_name == "open");
         check!(let ResourceActionInputKind::Create { accept: Accept::Default } = &input.actions[0].kind);
 
-        check!(input.actions[1].name == "assign");
+        check!(input.actions[1].raw_name == "assign");
         assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = &input.actions[1].kind);
         check!(idents.len() == 1);
         check!(idents[0] == "subject");
@@ -1404,7 +1412,7 @@ mod tests {
             create open;
         }));
 
-        check!(action.name == "open");
+        check!(action.raw_name == "open");
         check!(let ResourceActionInputKind::Create { accept: Accept::Default } = action.kind);
     }
 
@@ -1416,7 +1424,7 @@ mod tests {
             }
         }));
 
-        check!(action.name == "bulk_insert");
+        check!(action.raw_name == "bulk_insert");
         assert!(let ResourceActionInputKind::Create { accept: Accept::Only(idents) } = action.kind);
         let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
         check!(names == vec!["name", "email", "age"]);
@@ -1428,7 +1436,7 @@ mod tests {
             destroy foo;
         }));
 
-        check!(action.name == "foo");
+        check!(action.raw_name == "foo");
         check!(let ResourceActionInputKind::Destroy = action.kind);
     }
 
@@ -1481,7 +1489,7 @@ mod tests {
             update close;
         }));
 
-        check!(action.name == "close");
+        check!(action.raw_name == "close");
         assert!(let ResourceActionInputKind::Update(update) = &action.kind);
         check!(let Accept::Default = update.accept);
         check!(update.changes.is_empty());
@@ -1498,7 +1506,7 @@ mod tests {
             }
         }));
 
-        check!(action.name == "close");
+        check!(action.raw_name == "close");
         assert!(let ResourceActionInputKind::Update(update) = &action.kind);
         assert!(let Accept::Only(idents) = &update.accept);
         check!(idents.is_empty());
@@ -1514,7 +1522,7 @@ mod tests {
             }
         }));
 
-        check!(action.name == "reassign");
+        check!(action.raw_name == "reassign");
         assert!(let ResourceActionInputKind::Update(update) = &action.kind);
         assert!(let Accept::Only(idents) = &update.accept);
         let names: Vec<String> = idents.iter().map(|i| i.to_string()).collect();
@@ -1538,7 +1546,7 @@ mod tests {
         });
 
         check!(input.actions.len() == 2);
-        check!(input.actions[1].name == "remove");
+        check!(input.actions[1].raw_name == "remove");
         check!(let ResourceActionInputKind::Destroy = input.actions[1].kind);
     }
 
@@ -1716,7 +1724,7 @@ mod tests {
             read all;
         }));
 
-        check!(action.name == "all");
+        check!(action.raw_name == "all");
         assert!(let ResourceActionInputKind::Read(read) = &action.kind);
         check!(read.arguments.is_empty());
         check!(read.filters.is_empty());
