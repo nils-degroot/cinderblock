@@ -120,7 +120,7 @@ pub fn resource(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     };
 
     let name_segments = input.name.str_segments();
-    let resource_name_literal = input.name.as_literal();
+    let resource_name_literal = input.name.to_string();
 
     quote::quote! {
         #[derive(::std::fmt::Debug, ::std::clone::Clone, cinderblock_core::serde::Serialize, cinderblock_core::serde::Deserialize)]

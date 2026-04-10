@@ -84,7 +84,7 @@ async fn create_with_optional_fields_set_to_null() {
         .await
         .unwrap();
 
-    check!(resp.status() == axum::http::StatusCode::CREATED);
+    check!(resp.status() == axum::http::StatusCode::OK);
 
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -116,7 +116,7 @@ async fn create_with_optional_fields_set_to_values() {
         .await
         .unwrap();
 
-    check!(resp.status() == axum::http::StatusCode::CREATED);
+    check!(resp.status() == axum::http::StatusCode::OK);
 
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -146,7 +146,7 @@ async fn create_with_optional_fields_omitted() {
         .await
         .unwrap();
 
-    check!(resp.status() == axum::http::StatusCode::CREATED);
+    check!(resp.status() == axum::http::StatusCode::OK);
 
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

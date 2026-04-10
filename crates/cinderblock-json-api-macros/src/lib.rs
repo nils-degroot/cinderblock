@@ -37,7 +37,8 @@
 use std::collections::HashSet;
 
 use cinderblock_extension_api::{
-    Accept, ExtensionMacroInput, ResourceActionInput, ResourceActionInputKind, util::is_optional,
+    ActionCreate, ActionUpdate, ExtensionMacroInput, ResourceActionInput, ResourceActionInputKind,
+    ResourceMacroInput, util::is_optional,
 };
 use syn::{Ident, LitBool, LitStr, Token, Type, braced, parse::Parse};
 
@@ -117,10 +118,99 @@ impl Parse for HttpMethod {
 }
 
 #[derive(Debug, Clone)]
-struct EnrichedRouteDecl {
+struct EnrichedRouteDecl<'a> {
+    resource: &'a ResourceMacroInput,
+    action: &'a ResourceActionInput,
     route: RouteDecl,
-    action: ResourceActionInput,
     input_type: Ident,
+}
+
+impl EnrichedRouteDecl<'_> {
+    fn generate_handler(&self) -> proc_macro2::TokenStream {
+        let resource_name = self.resource.name.to_string();
+        let ident = self.resource.name.trailing_segment();
+        let action_name_str = self.action.action_name.to_string();
+        let action_type = self.action.action_name.clone();
+        let input_type = self.input_type.clone();
+
+        let (extractors, core_action_fn, parameters, error_handler) = match &self.action.kind {
+            ResourceActionInputKind::Read(_action_read) => todo!(),
+            ResourceActionInputKind::Create(_) => (
+                quote::quote! {
+                    cinderblock_json_api::axum::Json(input): cinderblock_json_api::axum::Json<#input_type>
+                },
+                quote::quote! { create },
+                quote::quote! { input, &ctx },
+                quote::quote! {
+                    cinderblock_core::CreateError::DataLayer(_) =>
+                        cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                },
+            ),
+            ResourceActionInputKind::Update(_) => (
+                quote::quote! {
+                    cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<<#ident as cinderblock_core::Resource>::PrimaryKey>,
+                    cinderblock_json_api::axum::Json(input): cinderblock_json_api::axum::Json<#input_type>,
+                },
+                quote::quote! { update },
+                quote::quote! { &primary_key, input, &ctx },
+                quote::quote! {
+                    cinderblock_core::UpdateError::NotFound { .. } =>
+                        cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                    cinderblock_core::UpdateError::DataLayer(_) =>
+                        cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                },
+            ),
+            ResourceActionInputKind::Destroy => (
+                quote::quote! {
+                    cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<<#ident as cinderblock_core::Resource>::PrimaryKey>,
+                },
+                quote::quote! { destroy },
+                quote::quote! { &primary_key, &ctx },
+                quote::quote! {
+                    cinderblock_core::DestroyError::NotFound { .. } =>
+                        cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                    cinderblock_core::DestroyError::DataLayer(_) =>
+                        cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                },
+            ),
+        };
+
+        quote::quote! {
+            move |#extractors| {
+                let ctx = ctx.clone();
+                async move {
+                    cinderblock_json_api::tracing::info!(
+                        resource = #resource_name,
+                        action = #action_name_str,
+                        "Performing action"
+                    );
+
+                    match cinderblock_core::#core_action_fn::<#ident, #action_type>(#parameters).await {
+                        Ok(response) => (
+                            cinderblock_json_api::axum::http::StatusCode::OK,
+                            cinderblock_json_api::axum::Json(
+                                cinderblock_json_api::Response { data: response },
+                            ),
+                        )
+                            .into_response(),
+                        Err(err) => {
+                            cinderblock_json_api::tracing::error!(
+                                resource = #resource_name,
+                                action = #action_name_str,
+                                error = %err,
+                                "Action failed"
+                            );
+
+                            (
+                                match err.data() { #error_handler },
+                                err.to_string()
+                            ).into_response()
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A single route declaration mapping an HTTP method + path to a resource action.
@@ -262,33 +352,6 @@ impl Parse for JsonApiConfig {
     }
 }
 
-/// Computes which attribute fields appear in a given action's input struct.
-///
-/// This replicates the field selection logic from `cinderblock-core-macros`: start
-/// with all writable attributes, then narrow by `Accept::Only` if specified.
-/// The returned list contains `(field_name, field_type)` pairs.
-fn input_fields_for_accept<'a>(
-    attributes: &'a [cinderblock_extension_api::ResourceAttributeInput],
-    accept: &Accept,
-) -> Vec<(&'a Ident, &'a syn::Type)> {
-    let writable: Vec<_> = attributes
-        .iter()
-        .filter(|attr| attr.writable.value())
-        .collect();
-
-    match accept {
-        Accept::Default => writable.iter().map(|a| (&a.name, &a.ty)).collect(),
-        Accept::Only(idents) => {
-            let names: HashSet<String> = idents.iter().map(|i| i.to_string()).collect();
-            writable
-                .iter()
-                .filter(|a| names.contains(&a.name.to_string()))
-                .map(|a| (&a.name, &a.ty))
-                .collect()
-        }
-    }
-}
-
 /// Extracts the inner `T` from an `Option<T>` type.
 ///
 /// Returns `None` if the type is not an `Option` or doesn't have exactly one
@@ -398,15 +461,15 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                 .actions
                 .iter()
                 .find(|action| action.raw_name == route.action)
-                .expect("Coult not find action")
-                .clone();
+                .expect("Coult not find action");
 
             let input_type =
                 Ident::new(&format!("{}Input", action.action_name), route.action.span());
 
             EnrichedRouteDecl {
-                route: route.clone(),
+                resource: &input.resource,
                 action,
+                route: route.clone(),
                 input_type,
             }
         })
@@ -445,8 +508,6 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     "get request failed"
                 );
             };
-
-            let input_type = route.input_type.clone();
 
             let handler_and_method = match &route.action.kind {
                 ResourceActionInputKind::Read(action_read) => {
@@ -526,144 +587,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
-                ResourceActionInputKind::Create { .. } => {
-                    let handler = quote::quote! {
-                        move |cinderblock_json_api::axum::Json(input): cinderblock_json_api::axum::Json<#input_type>| {
-                            let ctx = ctx.clone();
-                            async move {
-                                cinderblock_json_api::tracing::info!(
-                                    resource = stringify!(#ident),
-                                    action = #action_name_str,
-                                    "handling create request"
-                                );
-
-                                match cinderblock_core::create::<#ident, #action_type>(input, &ctx).await {
-                                    Ok(created) => (
-                                        cinderblock_json_api::axum::http::StatusCode::CREATED,
-                                        cinderblock_json_api::axum::Json(
-                                            cinderblock_json_api::Response { data: created },
-                                        ),
-                                    )
-                                        .into_response(),
-                                    Err(err) => {
-                                        cinderblock_json_api::tracing::error!(
-                                            resource = stringify!(#ident),
-                                            action = #action_name_str,
-                                            error = %err,
-                                            "create request failed"
-                                        );
-                                        let status = match err.data() {
-                                            cinderblock_core::CreateError::DataLayer(_) =>
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                        };
-                                        (status, err.to_string()).into_response()
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                    let routing_fn = route.route.method.axum_routing_fn();
-                    quote::quote! { #routing_fn(#handler) }
-                }
-                ResourceActionInputKind::Update(_) => {
-                    let handler = quote::quote! {
-                        move |
-                            cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<
-                                <#ident as cinderblock_core::Resource>::PrimaryKey,
-                            >,
-                            cinderblock_json_api::axum::Json(input): cinderblock_json_api::axum::Json<#input_type>,
-                        | {
-                            let ctx = ctx.clone();
-                            async move {
-                                cinderblock_json_api::tracing::info!(
-                                    resource = stringify!(#ident),
-                                    action = #action_name_str,
-                                    %primary_key,
-                                    "handling update request"
-                                );
-
-                                match cinderblock_core::update::<#ident, #action_type>(
-                                    &primary_key,
-                                    input,
-                                    &ctx,
-                                )
-                                .await
-                                {
-                                    Ok(updated) => (
-                                        cinderblock_json_api::axum::http::StatusCode::OK,
-                                        cinderblock_json_api::axum::Json(
-                                            cinderblock_json_api::Response { data: updated },
-                                        ),
-                                    )
-                                        .into_response(),
-                                    Err(err) => {
-                                        cinderblock_json_api::tracing::error!(
-                                            resource = stringify!(#ident),
-                                            action = #action_name_str,
-                                            error = %err,
-                                            "update request failed"
-                                        );
-                                        let status = match err.data() {
-                                            cinderblock_core::UpdateError::NotFound { .. } =>
-                                                cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
-                                            cinderblock_core::UpdateError::DataLayer(_) =>
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                        };
-                                        (status, err.to_string()).into_response()
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                    let routing_fn = route.route.method.axum_routing_fn();
-                    quote::quote! { #routing_fn(#handler) }
-                }
-                ResourceActionInputKind::Destroy => {
-                    let handler = quote::quote! {
-                        move |
-                            cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<
-                                <#ident as cinderblock_core::Resource>::PrimaryKey,
-                            >,
-                        | {
-                            let ctx = ctx.clone();
-                            async move {
-                                cinderblock_json_api::tracing::info!(
-                                    resource = stringify!(#ident),
-                                    action = #action_name_str,
-                                    %primary_key,
-                                    "handling destroy request"
-                                );
-
-                                match cinderblock_core::destroy::<#ident, #action_type>(
-                                    &primary_key,
-                                    &ctx,
-                                )
-                                .await
-                                {
-                                    Ok(_) => cinderblock_json_api::axum::http::StatusCode::NO_CONTENT
-                                        .into_response(),
-                                    Err(err) => {
-                                        cinderblock_json_api::tracing::error!(
-                                            resource = stringify!(#ident),
-                                            action = #action_name_str,
-                                            error = %err,
-                                            "destroy request failed"
-                                        );
-                                        let status = match err.data() {
-                                            cinderblock_core::DestroyError::NotFound { .. } =>
-                                                cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
-                                            cinderblock_core::DestroyError::DataLayer(_) =>
-                                                cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                        };
-                                        (status, err.to_string()).into_response()
-                                    }
-                                }
-                            }
-                        }
-                    };
-
+                ResourceActionInputKind::Create { .. } | ResourceActionInputKind::Update(_) | ResourceActionInputKind::Destroy => {
+                    let handler = route.generate_handler();
                     let routing_fn = route.route.method.axum_routing_fn();
                     quote::quote! { #routing_fn(#handler) }
                 }
@@ -784,7 +709,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                     _ => return None,
                 };
 
-                let fields = input_fields_for_accept(&resource.attributes, accept);
+                let fields = accept.writable_input_fields(&resource.attributes);
 
                 let properties: Vec<_> = fields
                     .iter()
@@ -1092,9 +1017,8 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                         }
                     }
                     }
-                    ResourceActionInputKind::Create(create) => {
-                        let fields = input_fields_for_accept(&resource.attributes, &create.accept);
-                        let body_required = !fields.is_empty();
+                    ResourceActionInputKind::Create(ActionCreate { accept }) | ResourceActionInputKind::Update(ActionUpdate { accept, .. }) => {
+                        let body_required = !accept.writable_input_fields(&resource.attributes).is_empty();
 
                         quote::quote! {
                             .path(
@@ -1104,67 +1028,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                     cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
                                         .operation_id(Some(#operation_id))
                                         .tag(#ident_str)
-                                        .summary(Some(format!("Create {} via {}", #ident_str, #action_name_str)))
-                                        #pk_parameter
-                                        .request_body(Some(
-                                            cinderblock_json_api::utoipa::openapi::request_body::RequestBodyBuilder::new()
-                                                .content(
-                                                    "application/json",
-                                                    cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
-                                                        .schema(Some(<#input_type as cinderblock_json_api::utoipa::PartialSchema>::schema()))
-                                                        .build(),
-                                                )
-                                                .required(Some(
-                                                    if #body_required {
-                                                        cinderblock_json_api::utoipa::openapi::Required::True
-                                                    } else {
-                                                        cinderblock_json_api::utoipa::openapi::Required::False
-                                                    },
-                                                ))
-                                                .build(),
-                                        ))
-                                        .response(
-                                            "201",
-                                            cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
-                                                .description(format!("{} created", #ident_str))
-                                                .content(
-                                                    "application/json",
-                                                    cinderblock_json_api::utoipa::openapi::ContentBuilder::new()
-                                                        .schema(Some(
-                                                            cinderblock_json_api::utoipa::openapi::schema::ObjectBuilder::new()
-                                                                .schema_type(
-                                                                    cinderblock_json_api::utoipa::openapi::schema::SchemaType::new(
-                                                                        cinderblock_json_api::utoipa::openapi::schema::Type::Object,
-                                                                    ),
-                                                                )
-                                                                .property(
-                                                                    "data",
-                                                                    <#ident as cinderblock_json_api::utoipa::PartialSchema>::schema(),
-                                                                )
-                                                                .required("data"),
-                                                        ))
-                                                        .build(),
-                                                )
-                                                .build(),
-                                        )
-                                        .build(),
-                                ),
-                            )
-                        }
-                    }
-                    ResourceActionInputKind::Update(update) => {
-                        let fields = input_fields_for_accept(&resource.attributes, &update.accept);
-                        let body_required = !fields.is_empty();
-
-                        quote::quote! {
-                            .path(
-                                #full_path,
-                                cinderblock_json_api::utoipa::openapi::PathItem::new(
-                                    #http_method,
-                                    cinderblock_json_api::utoipa::openapi::path::OperationBuilder::new()
-                                        .operation_id(Some(#operation_id))
-                                        .tag(#ident_str)
-                                        .summary(Some(format!("Update {} via {}", #ident_str, #action_name_str)))
+                                        .summary(Some(format!("Performs {} on {}", #action_name_str, #ident_str)))
                                         #pk_parameter
                                         .request_body(Some(
                                             cinderblock_json_api::utoipa::openapi::request_body::RequestBodyBuilder::new()
@@ -1186,7 +1050,7 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
                                         .response(
                                             "200",
                                             cinderblock_json_api::utoipa::openapi::ResponseBuilder::new()
-                                                .description(format!("{} updated", #ident_str))
+                                                .description("Action performed successfully")
                                                 .content(
                                                     "application/json",
                                                     cinderblock_json_api::utoipa::openapi::ContentBuilder::new()

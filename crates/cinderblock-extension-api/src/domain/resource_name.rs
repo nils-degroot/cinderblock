@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::{fmt::Display, ops::Deref};
 
 use syn::{Ident, Token, parse::Parse, punctuated::Punctuated};
 
@@ -15,8 +15,10 @@ impl ResourceName {
             .collect::<Vec<_>>()
     }
 
-    pub fn as_literal(&self) -> String {
-        self.str_segments().join(".")
+    pub fn trailing_segment(&self) -> &Ident {
+        self.segments
+            .last()
+            .expect("resource name must have at least one segment")
     }
 }
 
@@ -36,6 +38,12 @@ impl Parse for ResourceName {
             .collect::<Vec<_>>();
 
         Ok(Self { segments })
+    }
+}
+
+impl Display for ResourceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.str_segments().join("."))
     }
 }
 
