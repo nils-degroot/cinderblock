@@ -14,6 +14,8 @@
 //      `ExtensionMacroInput<C>`, where `C: Parse` is the extension's own
 //      config type
 
+use std::collections::HashSet;
+
 use syn::{
     ExprClosure, Ident, LitBool, Path, Token, Type, braced, bracketed, parenthesized, parse::Parse,
     punctuated::Punctuated,
@@ -252,6 +254,30 @@ pub enum Accept {
     #[default]
     Default,
     Only(Vec<Ident>),
+}
+
+impl Accept {
+    pub fn writable_input_fields<'a>(
+        &self,
+        attributes: &'a [ResourceAttributeInput],
+    ) -> Vec<(&'a Ident, &'a syn::Type)> {
+        let writable = attributes.iter().filter(|attr| attr.writable.value());
+
+        match self {
+            Accept::Default => writable.map(|a| (&a.name, &a.ty)).collect(),
+            Accept::Only(idents) => {
+                let names = idents
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<HashSet<_>>();
+
+                writable
+                    .filter(|a| names.contains(&a.name.to_string()))
+                    .map(|a| (&a.name, &a.ty))
+                    .collect()
+            }
+        }
+    }
 }
 
 //---------------------------------------------------------------------------
