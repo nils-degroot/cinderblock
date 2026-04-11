@@ -65,14 +65,16 @@ impl HttpMethod {
     }
 
     /// Returns the corresponding `axum::routing::*` function as a token stream.
-    fn axum_routing_fn(&self) -> proc_macro2::TokenStream {
-        match self {
+    fn axum_routing_fn(&self, handler: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        let method = match self {
             Self::Get => quote::quote! { cinderblock_json_api::axum::routing::get },
             Self::Post => quote::quote! { cinderblock_json_api::axum::routing::post },
             Self::Patch => quote::quote! { cinderblock_json_api::axum::routing::patch },
             Self::Put => quote::quote! { cinderblock_json_api::axum::routing::put },
             Self::Delete => quote::quote! { cinderblock_json_api::axum::routing::delete },
-        }
+        };
+
+        quote::quote! { #method(#handler) }
     }
 
     /// Returns the corresponding `utoipa` `HttpMethod` variant as a token stream.
@@ -133,14 +135,57 @@ impl EnrichedRouteDecl<'_> {
         let action_type = self.action.action_name.clone();
         let input_type = self.input_type.clone();
 
-        let (extractors, core_action_fn, parameters, error_handler) = match &self.action.kind {
-            ResourceActionInputKind::Read(_action_read) => todo!(),
+        let (extractors, core_action_fn, parameters, response_mapping, error_handler) = match &self
+            .action
+            .kind
+        {
+            ResourceActionInputKind::Read(action_read) if action_read.get => (
+                quote::quote! {
+                    cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<<#ident as cinderblock_core::Resource>::PrimaryKey>,
+                },
+                quote::quote! { read_one },
+                quote::quote! { &ctx, &primary_key },
+                quote::quote! { cinderblock_json_api::Response { data: response } },
+                quote::quote! {
+                    cinderblock_core::ReadError::NotFound { .. } =>
+                        cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
+                    cinderblock_core::ReadError::DataLayer(_) =>
+                        cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                },
+            ),
+            ResourceActionInputKind::Read(action_read) => {
+                let args_type = if action_read.arguments.is_empty() {
+                    quote::quote! { () }
+                } else {
+                    let ident =
+                        Ident::new(&format!("{action_type}Arguments"), self.route.action.span());
+                    quote::quote! { #ident }
+                };
+
+                (
+                    quote::quote! {
+                        cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
+                    },
+                    quote::quote! { read },
+                    quote::quote! { &ctx, &args },
+                    if action_read.paged.is_some() {
+                        quote::quote! { cinderblock_json_api::PaginatedResponse::from(response) }
+                    } else {
+                        quote::quote! { cinderblock_json_api::Response::from(response) }
+                    },
+                    quote::quote! {
+                        cinderblock_core::ListError::DataLayer(_) =>
+                            cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    },
+                )
+            }
             ResourceActionInputKind::Create(_) => (
                 quote::quote! {
                     cinderblock_json_api::axum::Json(input): cinderblock_json_api::axum::Json<#input_type>
                 },
                 quote::quote! { create },
                 quote::quote! { input, &ctx },
+                quote::quote! { cinderblock_json_api::Response { data: response } },
                 quote::quote! {
                     cinderblock_core::CreateError::DataLayer(_) =>
                         cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -153,6 +198,7 @@ impl EnrichedRouteDecl<'_> {
                 },
                 quote::quote! { update },
                 quote::quote! { &primary_key, input, &ctx },
+                quote::quote! { cinderblock_json_api::Response { data: response } },
                 quote::quote! {
                     cinderblock_core::UpdateError::NotFound { .. } =>
                         cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
@@ -166,6 +212,7 @@ impl EnrichedRouteDecl<'_> {
                 },
                 quote::quote! { destroy },
                 quote::quote! { &primary_key, &ctx },
+                quote::quote! { cinderblock_json_api::Response { data: response } },
                 quote::quote! {
                     cinderblock_core::DestroyError::NotFound { .. } =>
                         cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
@@ -178,6 +225,7 @@ impl EnrichedRouteDecl<'_> {
         quote::quote! {
             move |#extractors| {
                 let ctx = ctx.clone();
+
                 async move {
                     cinderblock_json_api::tracing::info!(
                         resource = #resource_name,
@@ -186,13 +234,7 @@ impl EnrichedRouteDecl<'_> {
                     );
 
                     match cinderblock_core::#core_action_fn::<#ident, #action_type>(#parameters).await {
-                        Ok(response) => (
-                            cinderblock_json_api::axum::http::StatusCode::OK,
-                            cinderblock_json_api::axum::Json(
-                                cinderblock_json_api::Response { data: response },
-                            ),
-                        )
-                            .into_response(),
+                        Ok(response) => (cinderblock_json_api::axum::http::StatusCode::OK, cinderblock_json_api::axum::Json(#response_mapping)).into_response(),
                         Err(err) => {
                             cinderblock_json_api::tracing::error!(
                                 resource = #resource_name,
@@ -201,10 +243,7 @@ impl EnrichedRouteDecl<'_> {
                                 "Action failed"
                             );
 
-                            (
-                                match err.data() { #error_handler },
-                                err.to_string()
-                            ).into_response()
+                            (match err.data() { #error_handler }, err.to_string()).into_response()
                         }
                     }
                 }
@@ -489,125 +528,21 @@ pub fn __resource_extension(item: proc_macro::TokenStream) -> proc_macro::TokenS
             let full_path = format!("{base_path}{}", route.route.path.value());
             let method_str = route.route.method.as_str();
 
-            let action_type = route.action.action_name.clone();
-            let args_type = Ident::new(&format!("{action_type}Arguments"), route.route.action.span());
-
-            let pre_flight_trace = quote::quote! {
-                cinderblock_json_api::tracing::info!(
-                    resource = stringify!(#ident),
-                    action = #action_name_str,
-                    "handling read request"
-                );
-            };
-
-            let error_trace = quote::quote! {
-                cinderblock_json_api::tracing::error!(
-                    resource = stringify!(#ident),
-                    action = #action_name_str,
-                    error = %err,
-                    "get request failed"
-                );
-            };
-
-            let handler_and_method = match &route.action.kind {
-                ResourceActionInputKind::Read(action_read) => {
-                    let handler = if action_read.get {
-                        quote::quote! {
-                            move |
-                                cinderblock_json_api::axum::extract::Path(primary_key): cinderblock_json_api::axum::extract::Path<
-                                    <#ident as cinderblock_core::Resource>::PrimaryKey,
-                                >,
-                            | {
-                                let ctx = ctx.clone();
-                                async move {
-                                    #pre_flight_trace
-
-                                    match cinderblock_core::read_one::<#ident, #action_type>(&ctx, &primary_key).await {
-                                        Ok(result) => (
-                                            cinderblock_json_api::axum::http::StatusCode::OK,
-                                            cinderblock_json_api::axum::Json(
-                                                cinderblock_json_api::Response { data: result },
-                                            ),
-                                        )
-                                            .into_response(),
-                                        Err(err) => {
-                                            #error_trace
-                                            let status = match err.data() {
-                                                cinderblock_core::ReadError::NotFound { .. } =>
-                                                    cinderblock_json_api::axum::http::StatusCode::NOT_FOUND,
-                                                cinderblock_core::ReadError::DataLayer(_) =>
-                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                            };
-                                            (status, err.to_string()).into_response()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        let args_type = if action_read.arguments.is_empty() {
-                            quote::quote! { () }
-                        } else {
-                            quote::quote! { #args_type }
-                        };
-
-                        let response_mapping = if action_read.paged.is_some() {
-                            quote::quote! { cinderblock_json_api::PaginatedResponse::from }
-                        } else {
-                            quote::quote! { cinderblock_json_api::Response::from }
-                        };
-
-                        quote::quote! {
-                            move |
-                                cinderblock_json_api::axum::extract::Query(args): cinderblock_json_api::axum::extract::Query<#args_type>,
-                            | {
-                                let ctx = ctx.clone();
-                                async move {
-                                    #pre_flight_trace
-
-                                    match cinderblock_core::read::<#ident, #action_type>(&ctx, &args).await {
-                                        Ok(result) => (
-                                            cinderblock_json_api::axum::http::StatusCode::OK,
-                                            cinderblock_json_api::axum::Json(#response_mapping(result))
-                                        ).into_response(),
-                                        Err(err) => {
-                                            #error_trace
-                                            let status = match err.data() {
-                                                cinderblock_core::ListError::DataLayer(_) =>
-                                                    cinderblock_json_api::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                                            };
-                                            (status, err.to_string()).into_response()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                    let routing_fn = route.route.method.axum_routing_fn();
-                    quote::quote! { #routing_fn(#handler) }
-                }
-                ResourceActionInputKind::Create { .. } | ResourceActionInputKind::Update(_) | ResourceActionInputKind::Destroy => {
-                    let handler = route.generate_handler();
-                    let routing_fn = route.route.method.axum_routing_fn();
-                    quote::quote! { #routing_fn(#handler) }
-                }
-            };
+            let route_fn = route.route.method.axum_routing_fn(route.generate_handler());
 
             quote::quote! {
                 {
                     let ctx = ctx.clone();
+
                     cinderblock_json_api::tracing::info!(
                         resource = stringify!(#ident),
                         action = #action_name_str,
                         method = #method_str,
                         route = #full_path,
-                        "registering JSON API endpoint"
+                        "Registering JSON API endpoint"
                     );
-                    router = router.route(
-                        #full_path,
-                        #handler_and_method,
-                    );
+
+                    router = router.route(#full_path, #route_fn);
                 }
             }
         })
